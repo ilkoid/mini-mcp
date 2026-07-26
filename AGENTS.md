@@ -121,3 +121,43 @@ stays out of that JSON — the wrapper sources it.
   don't send a debugger there first.
 - **No WSL/PowerShell layer.** The `.cmd` runs under plain `cmd.exe`. Don't
   wrap it in `powershell -File ...` — adds ExecutionPolicy friction for nothing.
+
+## Secrets hygiene — NEVER commit real secrets
+
+This rule exists because of a real incident: a one-off "deployment
+copy-paste" doc (commit `90be85f`, since purged) shipped both `PG_RO_PWD`
+and `PG_ADMIN_PWD` to the **public** repo. The fix (history rewrite +
+force-push) did **not** remove the leaked commit from GitHub — orphan
+commits stay reachable by direct commit URL for ~90 days after a
+force-push. `git log -p` shows nothing (the orphan is off-branch), but
+the password is still downloadable in a browser. The only real
+mitigation was rotating the password at the server.
+
+**Hard rules for any doc, example, or comment in this repo:**
+
+1. **Placeholders only, never real values.** Write `set PG_RO_PWD=<your_mcp_ro_password>`,
+   never `set PG_RO_PWD=actual_password`. This applies to README, AGENTS.md,
+   SQL, `.cmd`/`.sh`, commit messages, and inline comments. "It's just a
+   draft" / "I'll fix it later" is how it ships.
+2. **Secrets live outside the repo**, by design: the wrapper sources
+   `~/.config/mcp-pg-readonly/env` (Unix) / `env.cmd` (Windows), or reads
+   `PG_RO_PWD` from the process environment (e.g. `setx` on Windows). The
+   repo never needs the real value to be useful — examples use `...` or
+   `<placeholder>`.
+3. **Pre-commit gate.** Before `git commit`, scan the diff:
+   `git diff --cached | grep -iE 'password|pwd|passwd|secret|token'`.
+   Hits in lines that look like `= <real-value>` (not `<placeholder>` or
+   `...`) → stop and replace. Keep this rule even if it feels paranoid.
+4. **If a secret slips into a commit anyway**, do BOTH before pushing:
+   - **Rotate the secret at the server** (`ALTER ROLE ... PASSWORD`). This
+     is the only thing that actually closes the hole — history cleanup can
+     never recall clones, forks, or GitHub orphan-URLs.
+   - **Rewrite history before `git push`** (`git commit --amend` /
+     `filter-branch` / `filter-repo`). Once pushed, the orphan is on
+     GitHub for ~90 days regardless of force-push; recovery means deleting
+     and recreating the repo, or opening a GitHub Support ticket.
+5. **Verify leak cleanup by URL, not `git log`.** After a force-push,
+   `git log -p` (and `git grep` on `origin/main`) show the clean history —
+   but the leaked commit is still at
+   `github.com/<owner>/<repo>/commit/<old-sha>`. Open that URL in a
+   browser to confirm it 404s. Only then is the leak actually off GitHub.
