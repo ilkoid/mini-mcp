@@ -1,0 +1,11 @@
+# Compiled binary (installed to ~/bin/mcp-pg-readonly via the wrapper)
+/mcp-pg-readonly
+*.exe
+
+# Local env / secrets (wrapper sources ~/.config/mcp-pg-readonly/env)
+.env
+.env.*
+
+# Editor / OS noise
+.DS_Store
+*.swp

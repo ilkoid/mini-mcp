@@ -1,0 +1,20 @@
+-- role-bootstrap-layers.sql — Phase B (NOT YET — placeholder).
+--
+-- Per AGENTS.md, the `analytical` and `recommendation` schemas do not exist
+-- yet at design time. When they are created, run this to extend mcp_ro's
+-- SELECT privileges to them. Until then, this file is intentionally inert.
+--
+-- Prereq:  CREATE SCHEMA analytical; CREATE SCHEMA recommendation;
+-- Then:    psql ... -d <db> -v pwd="$PG_RO_PWD" -f role-bootstrap-layers.sql
+--          (and fill in <table_owner> per schema — see role-bootstrap.sql §4)
+
+-- GRANT USAGE ON SCHEMA analytical, recommendation TO mcp_ro;
+-- GRANT SELECT ON ALL TABLES IN SCHEMA analytical, recommendation TO mcp_ro;
+--
+-- ALTER DEFAULT PRIVILEGES FOR ROLE <table_owner> IN SCHEMA analytical
+--   GRANT SELECT ON TABLES TO mcp_ro;
+-- ALTER DEFAULT PRIVILEGES FOR ROLE <table_owner> IN SCHEMA recommendation
+--   GRANT SELECT ON TABLES TO mcp_ro;
+--
+-- REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER
+--   ON ALL TABLES IN SCHEMA analytical, recommendation FROM mcp_ro;
