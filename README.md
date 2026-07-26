@@ -117,6 +117,61 @@ Restart ZCode → **Settings → MCP** should show both servers green with
 The password is **not** in this JSON — the wrapper sources it from
 `~/.config/mcp-pg-readonly/env`.
 
+## Multiple databases / VPS
+
+This server runs **one MCP process per database** — there is no in-process
+multi-DB mode, and a `connections.yaml` would just shadow what flags + env
+already express. To connect a second VPS or database, register **another
+server entry** in `~/.zcode/cli/config.json` with its own host/port/args. The
+agent then sees each DB under its own tool namespace
+(`mcp__pg-prod__…`, `mcp__pg-vps2__…`) and picks the right one per task.
+
+The setup assumes a **shared `mcp_ro` role with the same password across all
+hosts** (the default). That keeps one secrets file (`env`) working for every
+server — each entry differs only by `PGHOST` / `PGPORT` / `PGSSLMODE` /
+`--database`.
+
+```jsonc
+// ~/.zcode/cli/config.json
+{
+  "mcp": {
+    "servers": {
+      "pg-prod": {
+        "type": "stdio",
+        "command": "/Users/ilkoid/bin/mcp-pg-readonly-run",
+        "args": ["--database", "wb_data_prod"],
+        "env": { "PGHOST": "192.168.10.7", "PGPORT": "15432" }
+      },
+      "pg-vps2": {
+        "type": "stdio",
+        "command": "/Users/ilkoid/bin/mcp-pg-readonly-run",
+        "args": ["--database", "main"],
+        "env": {
+          "PGHOST": "vps2.example.com", "PGPORT": "5432",
+          "PGSSLMODE": "require"
+        }
+      }
+    }
+  }
+}
+```
+
+### Per-host checklist
+
+- **Bootstrap the `mcp_ro` role on every host** with `role-bootstrap.sql`.
+  That role is the security boundary — its absence means no read-only
+  guarantee, just SQL parsing.
+- **Use `PGSSLMODE=require` (or `verify-full`) over the open internet.**
+  `disable` is only fine on a LAN/trusted tunnel.
+- **Distinct server names per DB** so a selftest can never hit the wrong host.
+- **Keep the password out of `config.json`** — it stays in the shared
+  `~/.config/mcp-pg-readonly/env`.
+
+> Per-host password instead of a shared one? The wrapper sources a secrets file
+> whose path can be overridden per server via `MCP_PG_SECRETS` (see
+> `mcp-pg-readonly-run.sh`). Drop one file per host under
+> `~/.config/mcp-pg-readonly/env.d/<name>` and point each server's `env` at it.
+
 ## Debug
 
 ```bash
