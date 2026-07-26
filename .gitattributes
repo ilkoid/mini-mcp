@@ -1,0 +1,12 @@
+# Line-ending hygiene across platforms (the repo ships a Unix wrapper AND a
+# Windows .cmd launcher). cmd/batch are picky about CRLF; Go/SQL/sh want LF.
+
+# Windows-only scripts -- CRLF in the working tree (cmd breaks on LF).
+*.cmd   text eol=crlf
+*.bat   text eol=crlf
+
+# Everything else defaults to LF (Go source, .sh, .sql, .md, .json, etc.).
+*       text=auto eol=lf
+
+# Binary -- never normalize.
+*.exe   binary

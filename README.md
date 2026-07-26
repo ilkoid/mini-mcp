@@ -172,6 +172,74 @@ server — each entry differs only by `PGHOST` / `PGPORT` / `PGSSLMODE` /
 > `mcp-pg-readonly-run.sh`). Drop one file per host under
 > `~/.config/mcp-pg-readonly/env.d/<name>` and point each server's `env` at it.
 
+## Windows
+
+The repo ships two launchers with identical behavior — pick the one matching
+your platform:
+
+| Platform | Wrapper | Secrets file syntax |
+|---|---|---|
+| Linux / macOS | `mcp-pg-readonly-run.sh` | `export PG_RO_PWD='...'` |
+| Windows | `mcp-pg-readonly-run.cmd` | `set PG_RO_PWD=...` |
+
+The Windows secrets file uses **`set`** (cmd syntax), **not** `export`. It is
+sourced via `call`, so the vars reach the `.exe`.
+
+### Build & install (Windows)
+
+```powershell
+cd $env:USERPROFILE\dev\mini-mcp   # or wherever you cloned
+go build -o $env:USERPROFILE\bin\mcp-pg-readonly.exe .
+
+# secrets -- note the .cmd extension and `set` syntax
+mkdir $env:USERPROFILE\.config\mcp-pg-readonly -Force
+@"
+set PG_RO_PWD='...'
+set PG_ADMIN_PWD='...'   REM only for role-bootstrap.sql
+"@ | Set-Content -Encoding ASCII $env:USERPROFILE\.config\mcp-pg-readonly\env.cmd
+
+# install the wrapper next to the .exe
+Copy-Item mcp-pg-readonly-run.cmd $env:USERPROFILE\bin\mcp-pg-readonly-run.cmd
+```
+
+Then bootstrap the `mcp_ro` role on the Windows host the same way (run
+`role-bootstrap.sql` via `psql` from an admin account) — same SQL, same
+privilege model. Read-only is enforced by the role regardless of OS.
+
+### Register in ZCode (Windows)
+
+Path separators in `config.json` must be **forward slashes** (even on Windows)
+or escaped backslashes — ZCode's JSON parser chokes on bare `\`. Forward
+slashes are simpler and work fine.
+
+```jsonc
+{
+  "mcp": {
+    "servers": {
+      "pg-readonly": {
+        "type": "stdio",
+        "command": "C:/Users/ilkoid/bin/mcp-pg-readonly-run.cmd",
+        "args": ["--database", "wb_data_prod"],
+        "env": { "PGHOST": "192.168.10.7", "PGPORT": "15432" }
+      }
+    }
+  }
+}
+```
+
+### Windows gotchas
+
+- **`.cmd` files want CRLF.** `.gitattributes` enforces this — don't override
+  it. A `.cmd` saved as LF can fail with cryptic `'@@' is not recognized`.
+- **`command` is a string, not an array**, and points at the **launcher**
+  (`.cmd`), not the `.exe` directly — same as on Unix where it points at the
+  `.sh` wrapper, not the binary. The launcher sources the password.
+- **`PGSSLMODE`**: if the Windows host reaches PG over the open internet, set
+  `require` (or `verify-full`). `disable` is only fine on a LAN/tunnel.
+- **No WSL/PowerShell needed.** The `.cmd` runs under plain `cmd.exe`, which
+  ZCode invokes directly. Don't wrap it in `powershell -File ...` — that adds
+  an ExecutionPolicy layer for nothing.
+
 ## Debug
 
 ```bash

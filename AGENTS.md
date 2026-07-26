@@ -31,7 +31,9 @@ PG_TEST_DSN="postgres://mcp_ro:...@host:port/db?sslmode=disable" \
 | `encode.go` | PG→JSON type mapping (int8/numeric as strings, etc.). |
 | `role-bootstrap.sql` | Phase A — creates the `mcp_ro` role (the real boundary). |
 | `role-bootstrap-layers.sql` | Phase B placeholder (`analytical`/`recommendation` schemas don't exist yet — intentionally inert). |
-| `mcp-pg-readonly-run.sh` | Secret wrapper installed at `~/bin/mcp-pg-readonly-run`; sources `~/.config/mcp-pg-readonly/env` (path overridable via `MCP_PG_SECRETS`), then execs the binary. |
+| `mcp-pg-readonly-run.sh` | Secret wrapper installed at `~/bin/mcp-pg-readonly-run`; sources `~/.config/mcp-pg-readonly/env` (path overridable via `MCP_PG_SECRETS`), then execs the binary. Unix launcher. |
+| `mcp-pg-readonly-run.cmd` | Windows equivalent of `.sh`. Sources `%USERPROFILE%\.config\mcp-pg-readonly\env.cmd` (note: `.cmd` ext, `set` syntax — NOT `export`), then execs `mcp-pg-readonly.exe`. Same `MCP_PG_SECRETS` override. |
+| `.gitattributes` | CRLF hygiene: `*.cmd`/`*.bat` forced to CRLF (cmd breaks on LF), everything else LF, `*.exe` binary. |
 | `*_test.go` | Unit (`ro_test.go`, `tools_test.go`) + integration (`ro_integration_test.go`, needs `PG_TEST_DSN`). |
 
 ## Architecture rules that matter for edits
@@ -97,3 +99,22 @@ Servers are registered in **`~/.zcode/cli/config.json`** (NOT
 path string (not an array). Prod and test are different server names
 (`pg-readonly` / `pg-readonly-test`) so a selftest can't hit prod. Password
 stays out of that JSON — the wrapper sources it.
+
+## Cross-platform (Unix ↔ Windows)
+
+- **Two launchers, one binary.** `mcp-pg-readonly-run.sh` (Unix) and
+  `mcp-pg-readonly-run.cmd` (Windows) are behaviorally identical: read a
+  secrets file, then exec the binary with forwarded args. `command` in
+  `config.json` points at whichever launcher matches the host.
+- **Secrets syntax differs.** Unix: `export PG_RO_PWD='...'` in `env`.
+  Windows: `set PG_RO_PWD=...` in `env.cmd`. Don't mix — cmd can't source
+  `export`, sh can't source `set`. Same shared `mcp_ro` password works across
+  both.
+- **Build per-OS.** `go build -o ~/bin/mcp-pg-readonly .` on Unix;
+  `go build -o %USERPROFILE%\bin\mcp-pg-readonly.exe .` on Windows. The binary
+  is OS-arch-specific — don't copy an `.exe` to a Linux VPS or vice versa.
+- **`.gitattributes` is load-bearing.** `*.cmd`/`*.bat` MUST stay CRLF in the
+  working tree; cmd.exe mis-parses LF-terminated batch. If a `.cmd` suddenly
+  fails with `'@@' is not recognized`, check line endings first.
+- **No WSL/PowerShell layer.** The `.cmd` runs under plain `cmd.exe`. Don't
+  wrap it in `powershell -File ...` — adds ExecutionPolicy friction for nothing.
