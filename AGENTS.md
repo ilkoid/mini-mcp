@@ -113,8 +113,10 @@ stays out of that JSON — the wrapper sources it.
 - **Build per-OS.** `go build -o ~/bin/mcp-pg-readonly .` on Unix;
   `go build -o %USERPROFILE%\bin\mcp-pg-readonly.exe .` on Windows. The binary
   is OS-arch-specific — don't copy an `.exe` to a Linux VPS or vice versa.
-- **`.gitattributes` is load-bearing.** `*.cmd`/`*.bat` MUST stay CRLF in the
-  working tree; cmd.exe mis-parses LF-terminated batch. If a `.cmd` suddenly
-  fails with `'@@' is not recognized`, check line endings first.
+- **`.gitattributes` is convention, not load-bearing.** `*.cmd`/`*.bat` are
+  kept CRLF (canonical batch format); everything else LF, `*.exe` binary.
+  Order matters — catch-all `*` goes first (last-match-wins). cmd.exe
+  tolerates LF for simple `.cmd`, so line endings are rarely the root cause;
+  don't send a debugger there first.
 - **No WSL/PowerShell layer.** The `.cmd` runs under plain `cmd.exe`. Don't
   wrap it in `powershell -File ...` — adds ExecutionPolicy friction for nothing.

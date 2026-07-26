@@ -229,8 +229,10 @@ slashes are simpler and work fine.
 
 ### Windows gotchas
 
-- **`.cmd` files want CRLF.** `.gitattributes` enforces this — don't override
-  it. A `.cmd` saved as LF can fail with cryptic `'@@' is not recognized`.
+- **`.cmd` is kept as CRLF by convention** (see `.gitattributes`). cmd.exe
+  tolerates LF for simple scripts like this one, so if something misbehaves
+  line endings are rarely the culprit — look at the secrets file and its
+  `set` syntax first.
 - **`command` is a string, not an array**, and points at the **launcher**
   (`.cmd`), not the `.exe` directly — same as on Unix where it points at the
   `.sh` wrapper, not the binary. The launcher sources the password.

@@ -13,7 +13,13 @@ REM The secrets file MUST use `set NAME=value` lines (cmd syntax), NOT
 REM `export NAME=value` (sh syntax). The companion file on Unix uses `export`.
 REM Keep this file CRLF (see .gitattributes); cmd is picky about line endings.
 
-setlocal enableextensions
+REM No setlocal/endlocal here. env.cmd sets PG_RO_PWD (and optionally PGHOST /
+REM PGPORT / PGSSLMODE / PGDATABASE), and we WANT those to reach the .exe. A
+REM local scope would roll them back on endlocal -- a classic cmd footgun: the
+REM trailing &-chain expands %VAR% at PARSE time (looks fine in an echo), but
+REM the .exe reads env at RUNTIME, after the rollback -> "empty password".
+REM enableextensions is on by default on modern Windows, so setlocal buys
+REM nothing here. Do NOT add it back "for cleanliness".
 
 if defined MCP_PG_SECRETS (
     set "SECRETS=%MCP_PG_SECRETS%"
@@ -27,5 +33,5 @@ if exist "%SECRETS%" (
     1>&2 echo mcp-pg-readonly-run: warning: secrets file not found at "%SECRETS%" (set PG_RO_PWD another way or create it)
 )
 
-REM env. must be enabled so PG_RO_PWD / PGHOST / etc. reach the .exe.
-endlocal & "%USERPROFILE%\bin\mcp-pg-readonly.exe" %*
+REM Direct exec -- no endlocal. env from `call "%SECRETS%"` stays live.
+"%USERPROFILE%\bin\mcp-pg-readonly.exe" %*

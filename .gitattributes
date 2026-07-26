@@ -1,12 +1,16 @@
 # Line-ending hygiene across platforms (the repo ships a Unix wrapper AND a
-# Windows .cmd launcher). cmd/batch are picky about CRLF; Go/SQL/sh want LF.
+# Windows .cmd launcher). cmd/batch convention is CRLF; Go/SQL/sh want LF.
+#
+# Order matters: .gitattributes is last-match-wins, and `*` matches .cmd too,
+# so the catch-all MUST come first and the specific rules below override it.
 
-# Windows-only scripts -- CRLF in the working tree (cmd breaks on LF).
+# Everything defaults to LF (Go source, .sh, .sql, .md, .json, etc.).
+*       text=auto eol=lf
+
+# Windows-only scripts -- CRLF in the working tree (cmd convention; cmd.exe
+# tolerates LF for simple scripts, but CRLF is the canonical batch format).
 *.cmd   text eol=crlf
 *.bat   text eol=crlf
-
-# Everything else defaults to LF (Go source, .sh, .sql, .md, .json, etc.).
-*       text=auto eol=lf
 
 # Binary -- never normalize.
 *.exe   binary
