@@ -9,3 +9,6 @@
 # Editor / OS noise
 .DS_Store
 *.swp
+
+# Local ZCode session artifacts (plans, etc.)
+.zcode/

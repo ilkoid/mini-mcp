@@ -172,7 +172,7 @@ server — each entry differs only by `PGHOST` / `PGPORT` / `PGSSLMODE` /
 > `mcp-pg-readonly-run.sh`). Drop one file per host under
 > `~/.config/mcp-pg-readonly/env.d/<name>` and point each server's `env` at it.
 
-## Windows
+## Windows (VPS)
 
 The repo ships two launchers with identical behavior — pick the one matching
 your platform:
@@ -180,37 +180,81 @@ your platform:
 | Platform | Wrapper | Secrets file syntax |
 |---|---|---|
 | Linux / macOS | `mcp-pg-readonly-run.sh` | `export PG_RO_PWD='...'` |
-| Windows | `mcp-pg-readonly-run.cmd` | `set PG_RO_PWD=...` |
+| Windows | `mcp-pg-readonly-run.cmd` | `set PG_RO_PWD=...` (**no quotes!**) |
 
-The Windows secrets file uses **`set`** (cmd syntax), **not** `export`. It is
-sourced via `call`, so the vars reach the `.exe`.
+The Windows secrets file uses **`set`** (cmd syntax), **not** `export` and
+**not** PowerShell `$env:`. It is sourced via `call`, so the vars reach the
+`.exe`. Do **not** quote the value — cmd `set` treats the quotes as part of
+the value, so `set PG_RO_PWD='abc'` stores literally `'abc'`.
 
-### Build & install (Windows)
+> Build/run these in **cmd.exe**, not PowerShell — the wrapper was written for
+> cmd. (ZCode itself invokes the `.cmd` via cmd.exe directly; no PowerShell or
+> WSL layer is needed.)
 
-```powershell
-cd $env:USERPROFILE\dev\mini-mcp   # or wherever you cloned
-go build -o $env:USERPROFILE\bin\mcp-pg-readonly.exe .
+### 1. Get the sources onto the VPS
 
-# secrets -- note the .cmd extension and `set` syntax
-mkdir $env:USERPROFILE\.config\mcp-pg-readonly -Force
-@"
-set PG_RO_PWD='...'
-set PG_ADMIN_PWD='...'   REM only for role-bootstrap.sql
-"@ | Set-Content -Encoding ASCII $env:USERPROFILE\.config\mcp-pg-readonly\env.cmd
+Either `git clone`, or SCP the `~/dev/mini-mcp/` folder from your Mac. You
+need the `.go` files, `go.mod`, `role-bootstrap.sql`, and
+`mcp-pg-readonly-run.cmd`.
 
-# install the wrapper next to the .exe
-Copy-Item mcp-pg-readonly-run.cmd $env:USERPROFILE\bin\mcp-pg-readonly-run.cmd
+### 2. Build the `.exe` on the VPS (Go is installed there)
+
+```cmd
+cd %USERPROFILE%\dev\mini-mcp
+mkdir %USERPROFILE%\bin 2>nul
+go build -o %USERPROFILE%\bin\mcp-pg-readonly.exe .
+copy mcp-pg-readonly-run.cmd %USERPROFILE%\bin\mcp-pg-readonly-run.cmd
 ```
 
-Then bootstrap the `mcp_ro` role on the Windows host the same way (run
-`role-bootstrap.sql` via `psql` from an admin account) — same SQL, same
-privilege model. Read-only is enforced by the role regardless of OS.
+> Don't copy the macOS-built binary (`Mach-O arm64`) to Windows — it won't
+> run. Build the `.exe` on the VPS (or cross-compile with
+> `GOOS=windows GOARCH=amd64 go build`).
 
-### Register in ZCode (Windows)
+### 3. Create the secrets file (run in PowerShell for ACL support)
 
-Path separators in `config.json` must be **forward slashes** (even on Windows)
-or escaped backslashes — ZCode's JSON parser chokes on bare `\`. Forward
-slashes are simpler and work fine.
+```powershell
+$dir = "$env:USERPROFILE\.config\mcp-pg-readonly"
+New-Item -ItemType Directory -Force -Path $dir | Out-Null
+
+# cmd `set` syntax, NOT export / $env:. Values must match what's in the DB.
+# SAME password as on the Mac if you share one mcp_ro role across hosts.
+$content = @'
+set PG_RO_PWD=CHANGE_ME_mcp_ro_password
+set PG_ADMIN_PWD=CHANGE_ME_postgres_admin_password
+'@
+
+$path = "$dir\env.cmd"
+Set-Content -Path $path -Value $content -Encoding ASCII
+# chmod 600 equivalent: strip inherited ACLs, leave only the current user.
+icacls.exe $path /inheritance:r /grant:r "$($env:USERNAME):(R,W)"
+Get-Content $path
+```
+
+> If ZCode runs as a **different user** than your RDP session, replace
+> `$($env:USERNAME)` in the `icacls` line with that user — otherwise the
+> wrapper can't read the file and you'll get "empty password".
+
+### 4. Bootstrap the role — only if the VPS has its OWN database
+
+**Skip this step if the VPS connects to the same PostgreSQL the Mac uses
+(`192.168.10.7:15432`)** — `mcp_ro` is already created there. Only run
+`role-bootstrap.sql` if the VPS has a separate PG instance:
+
+```cmd
+set PG_RO_PWD=CHANGE_ME_mcp_ro_password
+set PG_ADMIN_PWD=CHANGE_ME_postgres_admin_password
+"%ProgramFiles%\PostgreSQL\17\bin\psql.exe" -h 127.0.0.1 -p 5432 -U postgres ^
+  -d wb_data_test -v ON_ERROR_STOP=1 -v pwd="%PG_RO_PWD%" ^
+  -f %USERPROFILE%\dev\mini-mcp\role-bootstrap.sql
+```
+
+(adjust the psql path / host / port to your install)
+
+### 5. Register in ZCode on the VPS
+
+Edit `%USERPROFILE%\.zcode\cli\config.json`. Use **forward slashes** in the
+path (ZCode's JSON parser is happier with them than bare backslashes), and
+keep `command` as a **string** (not an array):
 
 ```jsonc
 {
@@ -218,7 +262,7 @@ slashes are simpler and work fine.
     "servers": {
       "pg-readonly": {
         "type": "stdio",
-        "command": "C:/Users/ilkoid/bin/mcp-pg-readonly-run.cmd",
+        "command": "C:/Users/YOUR_USER/bin/mcp-pg-readonly-run.cmd",
         "args": ["--database", "wb_data_prod"],
         "env": { "PGHOST": "192.168.10.7", "PGPORT": "15432" }
       }
@@ -227,20 +271,38 @@ slashes are simpler and work fine.
 }
 ```
 
+Replace `YOUR_USER` with the actual Windows username. Add a
+`pg-readonly-test` entry with `--database wb_data_test` if you want both.
+
+### 6. Selftest on the VPS
+
+```cmd
+%USERPROFILE%\bin\mcp-pg-readonly-run.cmd --selftest --database wb_data_test
+```
+
+Expect `selftest: PASS`. Then **fully restart ZCode** on the VPS →
+Settings → MCP → green, `toolCount: 3`.
+
 ### Windows gotchas
 
-- **`.cmd` is kept as CRLF by convention** (see `.gitattributes`). cmd.exe
-  tolerates LF for simple scripts like this one, so if something misbehaves
-  line endings are rarely the culprit — look at the secrets file and its
-  `set` syntax first.
+- **`set` value must not be quoted.** `set PG_RO_PWD=abc`, not `'abc'` —
+  cmd stores the quotes literally.
 - **`command` is a string, not an array**, and points at the **launcher**
   (`.cmd`), not the `.exe` directly — same as on Unix where it points at the
-  `.sh` wrapper, not the binary. The launcher sources the password.
-- **`PGSSLMODE`**: if the Windows host reaches PG over the open internet, set
+  `.sh` wrapper. The launcher sources the password.
+- **`.cmd` is kept CRLF by convention** (see `.gitattributes`). cmd.exe
+  tolerates LF for simple scripts, so if something misbehaves line endings
+  are rarely the culprit — look at the secrets file and its `set` syntax
+  first.
+- **`PGSSLMODE`**: if the VPS reaches PG over the open internet, set
   `require` (or `verify-full`). `disable` is only fine on a LAN/tunnel.
-- **No WSL/PowerShell needed.** The `.cmd` runs under plain `cmd.exe`, which
-  ZCode invokes directly. Don't wrap it in `powershell -File ...` — that adds
-  an ExecutionPolicy layer for nothing.
+- **No WSL/PowerShell layer.** The `.cmd` runs under plain `cmd.exe`. Don't
+  wrap it in `powershell -File ...` — that adds an ExecutionPolicy layer for
+  nothing.
+- **`setx` is not recommended.** It writes the password to the registry
+  (`HKCU\Environment`), visible to every process of your user. The `env.cmd`
+  + ACL approach mirrors the Unix `chmod 600` design and keeps the secret in
+  one place.
 
 ## Debug
 

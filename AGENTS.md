@@ -107,9 +107,10 @@ stays out of that JSON — the wrapper sources it.
   secrets file, then exec the binary with forwarded args. `command` in
   `config.json` points at whichever launcher matches the host.
 - **Secrets syntax differs.** Unix: `export PG_RO_PWD='...'` in `env`.
-  Windows: `set PG_RO_PWD=...` in `env.cmd`. Don't mix — cmd can't source
-  `export`, sh can't source `set`. Same shared `mcp_ro` password works across
-  both.
+  Windows: `set PG_RO_PWD=...` in `env.cmd` (**no quotes** — cmd stores them
+  literally, so `set X='abc'` → value is `'abc'`). Don't mix — cmd can't
+  source `export`, sh can't source `set`. Same shared `mcp_ro` password works
+  across both.
 - **Build per-OS.** `go build -o ~/bin/mcp-pg-readonly .` on Unix;
   `go build -o %USERPROFILE%\bin\mcp-pg-readonly.exe .` on Windows. The binary
   is OS-arch-specific — don't copy an `.exe` to a Linux VPS or vice versa.
