@@ -48,7 +48,7 @@ func newRowEncoder(oids []uint32) *rowEncoder {
 // also returns the byte size of the encoded row (for the byte cap).
 func (e *rowEncoder) encode(values []any) ([]interface{}, int, error) {
 	out := make([]interface{}, len(values))
-	var total int
+	total := 3 // per-row JSON framing: '[', ']', and the ',' separator
 	for i, v := range values {
 		cell, n, err := encodeCell(v, e.asString[i])
 		if err != nil {

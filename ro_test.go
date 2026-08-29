@@ -325,6 +325,21 @@ func TestTruncationNotice(t *testing.T) {
 	}
 }
 
+func TestEncodeChunkIncludesFraming(t *testing.T) {
+	// The byte cap must count the row's real wire size: cells + '[', ']', ','.
+	// Undercounting by ~3B/row let a 323-row result overshoot the client's
+	// 50KB resultBudget by ~280B and get its tail chopped.
+	e := newRowEncoder([]uint32{oidInt8})
+	row, chunk, err := e.encode([]any{int64(12)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := jsonMarshal(row[0])
+	if want := len(b) + 3; chunk != want {
+		t.Fatalf("chunk=%d, want cell(%d)+framing 3 = %d", chunk, len(b), want)
+	}
+}
+
 func TestEncodeNull(t *testing.T) {
 	e := newRowEncoder([]uint32{oidInt8})
 	row, _, err := e.encode([]any{nil})
