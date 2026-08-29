@@ -53,8 +53,20 @@ func main() {
 		user       = flag.String("user", defaultUser, "PostgreSQL user (default: mcp_ro)")
 		pwdEnvName = flag.String("password-env", defaultPwdEnv, "name of the env var holding the password (default: PG_RO_PWD)")
 		selftest   = flag.Bool("selftest", false, "connect as the role, verify SELECT works and writes are rejected, then exit (prints to stderr)")
+		// Timeouts (design §4.2). Defaults live in ro.go vars; flags override
+		// per server entry via config.json args (e.g. a slower shared instance).
+		stmtTimeoutFlag = flag.Duration("statement-timeout", statementTimeout, "per-statement server-side timeout, SET LOCAL inside the RO txn (default: 2m)")
+		queryTimeoutFlag = flag.Duration("query-timeout", queryTimeout, "whole-call ctx deadline; must exceed statement-timeout (default: 3m)")
 	)
 	flag.Parse()
+
+	// Apply to the package knobs BEFORE any query (selftest included).
+	statementTimeout = *stmtTimeoutFlag
+	queryTimeout = *queryTimeoutFlag
+	if queryTimeout <= statementTimeout {
+		fmt.Fprintf(os.Stderr, "error: --query-timeout (%s) must be greater than --statement-timeout (%s) so the DB-side cancel fires first\n", queryTimeout, statementTimeout)
+		os.Exit(2)
+	}
 
 	if *database == "" {
 		// PGDATABASE override (libpq convention).

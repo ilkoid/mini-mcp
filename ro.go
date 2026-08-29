@@ -12,11 +12,13 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -39,10 +41,14 @@ const (
 	maxBytes = 64 * 1024 // server-side soft cap on the JSON payload
 )
 
-// Per-query safety knobs (design §4.2).
-const (
-	queryTimeout    = 60 * time.Second // ctx deadline wrapping the whole call
-	statementTimeout = 30 * time.Second // SET LOCAL statement_timeout inside the RO txn
+// Per-query safety knobs (design §4.2). Vars (not consts) so main.go can set
+// them from --statement-timeout / --query-timeout flags. Defaults raised from
+// 30s/60s to 120s/180s: analytical queries over WB fact tables routinely
+// outgrow 30s, and the ctx deadline keeps 60s headroom over statement_timeout
+// so the DB-side cancel (clean 57014) fires before the ctx cut.
+var (
+	queryTimeout     = 180 * time.Second // ctx deadline wrapping the whole call
+	statementTimeout = 120 * time.Second // SET LOCAL statement_timeout inside the RO txn
 )
 
 // nonReadKeywords are rejected up-front as DX (NOT a security boundary — the
@@ -108,8 +114,23 @@ func leadingKeyword(sql string) string {
 	return strings.ToUpper(s[:i])
 }
 
+// wrapQueryError translates timeout failures into actionable messages (design
+// §4.2). SQLSTATE 57014 = query_canceled by statement_timeout; a raw ctx
+// deadline means the wider --query-timeout fired first. Other errors pass
+// through unchanged.
+func wrapQueryError(err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "57014" {
+		return fmt.Errorf("query exceeded statement_timeout (%s); add filters/limits/aggregates or raise --statement-timeout: %w", statementTimeout, err)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("query exceeded query-timeout (%s); raise --query-timeout (must stay above --statement-timeout): %w", queryTimeout, err)
+	}
+	return err
+}
+
 // runReadOnly executes a single SQL statement in a READ ONLY transaction with
-// a 30s statement_timeout, always rolls back, and applies row/byte caps.
+// a statement_timeout (SET LOCAL), always rolls back, and applies row/byte caps.
 func runReadOnly(ctx context.Context, pool *pgxpool.Pool, sql string, args []any) (*Result, error) {
 	if err := rejectUnsafeSQL(sql); err != nil {
 		return nil, err
@@ -130,13 +151,16 @@ func runReadOnly(ctx context.Context, pool *pgxpool.Pool, sql string, args []any
 	// SET LOCAL does NOT support $1 parameter binding (PG limitation); use
 	// set_config(name, value, is_local=true) instead — it accepts params, and
 	// is_local=true is the SET LOCAL equivalent (scoped to this transaction).
-	if _, err := tx.Exec(ctx, "SELECT set_config('statement_timeout', $1, true)", statementTimeout.String()); err != nil {
+	// The value is milliseconds as a plain integer: PG does NOT parse Go's
+	// Duration.String() ("2m0s" is invalid — selftest catches this); "30s"
+	// happens to parse but ms is unambiguous.
+	if _, err := tx.Exec(ctx, "SELECT set_config('statement_timeout', $1, true)", strconv.FormatInt(statementTimeout.Milliseconds(), 10)); err != nil {
 		return nil, fmt.Errorf("set statement_timeout: %w", err)
 	}
 
 	rows, err := tx.Query(ctx, sql, args...)
 	if err != nil {
-		return nil, fmt.Errorf("query: %w", err)
+		return nil, fmt.Errorf("query: %w", wrapQueryError(err))
 	}
 	defer rows.Close()
 
@@ -174,7 +198,7 @@ func runReadOnly(ctx context.Context, pool *pgxpool.Pool, sql string, args []any
 		res.RowCount++
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate rows: %w", err)
+		return nil, fmt.Errorf("iterate rows: %w", wrapQueryError(err))
 	}
 
 	if res.Truncated {

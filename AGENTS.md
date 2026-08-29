@@ -77,6 +77,17 @@ PG_TEST_DSN="postgres://mcp_ro:...@host:port/db?sslmode=disable" \
    `statement_timeout` is set per-query via `set_config(..., true)` (NOT
    globally in `newPool`, and NOT via `SET LOCAL $1` which PG doesn't support).
 
+7. **Three timeout layers; keep the order.** PG `statement_timeout` (default
+   **2min**, flag `--statement-timeout`) < whole-call ctx deadline (default
+   **3min**, flag `--query-timeout`) < ZCode client `timeoutMs` (set
+   **200000** in each config.json entry — client default is 30s!). The binary
+   refuses to start if query-timeout ≤ statement-timeout, so the DB-side
+   cancel (57014, wrapped with a hint by `wrapQueryError`) always fires
+   first. The `set_config` value is sent as **plain milliseconds** — PG does
+   not parse Go's `2m0s` duration format (selftest catches this). Don't
+   remove timeouts: they cap damage to the shared instance, and while one
+   query runs, that session's next tool call waits (`MaxConns=1`).
+
 ## JSON type encoding (`encode.go`)
 
 - **int8 / numeric → JSON string** (WB `nm_id` exceeds 2^53; float64 would
@@ -98,7 +109,8 @@ Servers are registered in **`~/.zcode/cli/config.json`** (NOT
 `~/.zcode/v2/config.json`, which is provider config). `command` is an absolute
 path string (not an array). Prod and test are different server names
 (`pg-readonly` / `pg-readonly-test`) so a selftest can't hit prod. Password
-stays out of that JSON — the wrapper sources it.
+stays out of that JSON — the wrapper sources it. Each entry carries
+`"timeoutMs": 200000` (see rule 7).
 
 ## Cross-platform (Unix ↔ Windows)
 

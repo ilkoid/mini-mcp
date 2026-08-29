@@ -1,7 +1,13 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
 	"testing"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func TestRejectUnsafeSQL_Empty(t *testing.T) {
@@ -87,6 +93,31 @@ func TestLeadingKeyword(t *testing.T) {
 		if got := leadingKeyword(in); got != want {
 			t.Fatalf("leadingKeyword(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestWrapQueryError(t *testing.T) {
+	// 57014 = query_canceled by statement_timeout -> actionable hint.
+	stmtTO := &pgconn.PgError{Code: "57014", Message: "canceling statement due to statement timeout"}
+	err := wrapQueryError(stmtTO)
+	msg := err.Error()
+	if !errors.Is(err, stmtTO) {
+		t.Fatal("57014 must remain wrap-compatible with the original PgError")
+	}
+	if want := fmt.Sprintf("query exceeded statement_timeout (%s)", statementTimeout); !strings.Contains(msg, want) {
+		t.Fatalf("57014 hint missing %q: got %q", want, msg)
+	}
+
+	// Raw ctx deadline -> query-timeout hint.
+	ctxErr := wrapQueryError(context.DeadlineExceeded)
+	if want := fmt.Sprintf("query exceeded query-timeout (%s)", queryTimeout); !strings.Contains(ctxErr.Error(), want) {
+		t.Fatalf("ctx hint missing %q: got %q", want, ctxErr.Error())
+	}
+
+	// Ordinary DB errors pass through unchanged.
+	other := &pgconn.PgError{Code: "42P01", Message: `relation "x" does not exist`}
+	if got := wrapQueryError(other); got != error(other) {
+		t.Fatalf("non-timeout error must pass through: got %v", got)
 	}
 }
 

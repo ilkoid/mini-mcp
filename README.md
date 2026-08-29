@@ -11,7 +11,7 @@ non-destructive tools over stdio JSON-RPC:
 
 Read-only is enforced **at the database** by a dedicated `mcp_ro` role (see
 `role-bootstrap.sql`). The server adds belt-and-suspenders: a `READ ONLY`
-transaction, a 30s `statement_timeout`, and 500-row / 64KB output caps. SQL
+transaction, a 2min `statement_timeout`, and 500-row / 64KB output caps. SQL
 parsing is **not** the security boundary — it's only a DX precheck.
 
 ## Paths
@@ -79,6 +79,40 @@ Connects as `mcp_ro`, runs `SELECT 1`, then a write probe that **must fail**
 (verifies the boundary end-to-end). Prints to stderr; exits non-zero on failure.
 Never runs against prod implicitly — you choose the database via `--database`.
 
+## Timeouts
+
+A long query faces **three independent limits**; the tightest one wins:
+
+| Layer | Default | Set via |
+|---|---|---|
+| PG `statement_timeout` (DB cancels the query) | **2min** | `--statement-timeout` flag |
+| Whole-call ctx deadline in the binary | **3min** | `--query-timeout` flag (must exceed statement-timeout) |
+| ZCode client `timeoutMs` (client gives up on the tool call) | 30s (!) | `"timeoutMs"` in the server's config.json entry |
+
+Defaults live in `ro.go`; flags override them per server entry via `args`.
+`--query-timeout` must be **greater** than `--statement-timeout` so the
+DB-side cancel (clean 57014 error with a hint) fires before the ctx cut —
+the binary refuses to start otherwise. The DB-side value is sent as plain
+milliseconds (`set_config('statement_timeout', …)`): PG does not parse Go's
+`2m0s` duration format.
+
+```jsonc
+// raise per server in ~/.zcode/cli/config.json if a shared instance is slower
+"args": ["--database", "wb_data_prod",
+         "--statement-timeout", "5m", "--query-timeout", "6m"],
+"timeoutMs": 400000
+```
+
+Always set `"timeoutMs"` above `--query-timeout`, or the client aborts a call
+the server is still legitimately running. **Don't** remove the timeouts
+entirely — they cap the damage a runaway query does to the shared instance,
+and while one runs, that session's next tool call waits (pool `MaxConns=1`).
+For genuinely heavy reports, use `psql` under `mcp_ro` directly — MCP is built
+for the agent's iterative, bounded-result exploration, not batch analytics.
+
+Output caps (500 rows / 64KB, then ZCode's own result budget) are **not**
+timeouts — a slow-but-successful query can still come back truncated. By design.
+
 ## Register in ZCode (user scope)
 
 Create/edit **`~/.zcode/cli/config.json`** (NOT `~/.zcode/v2/config.json` —
@@ -92,12 +126,14 @@ that's the provider config). Add two server entries for prod/test isolation:
         "type": "stdio",
         "command": "/Users/ilkoid/bin/mcp-pg-readonly-run",
         "args": ["--database", "wb_data_prod"],
+        "timeoutMs": 200000,
         "env": { "PGHOST": "192.168.10.7", "PGPORT": "15432" }
       },
       "pg-readonly-test": {
         "type": "stdio",
         "command": "/Users/ilkoid/bin/mcp-pg-readonly-run",
         "args": ["--database", "wb_data_test"],
+        "timeoutMs": 200000,
         "env": { "PGHOST": "192.168.10.7", "PGPORT": "15432" }
       }
     }
@@ -109,6 +145,8 @@ Rules (from `diagnosing-mcp`):
 - `command` is an **absolute path string** (not an array — that triggers
   `command.trim is not a function`).
 - Use `env`, not the legacy `environment`.
+- `timeoutMs` must be set above the server's `--query-timeout` (client default
+  is only 30s — see Timeouts above).
 - Prod and test are **different server names** so a selftest can't hit prod.
 
 Restart ZCode → **Settings → MCP** should show both servers green with
@@ -140,12 +178,14 @@ server — each entry differs only by `PGHOST` / `PGPORT` / `PGSSLMODE` /
         "type": "stdio",
         "command": "/Users/ilkoid/bin/mcp-pg-readonly-run",
         "args": ["--database", "wb_data_prod"],
+        "timeoutMs": 200000,
         "env": { "PGHOST": "192.168.10.7", "PGPORT": "15432" }
       },
       "pg-vps2": {
         "type": "stdio",
         "command": "/Users/ilkoid/bin/mcp-pg-readonly-run",
         "args": ["--database", "main"],
+        "timeoutMs": 200000,
         "env": {
           "PGHOST": "vps2.example.com", "PGPORT": "5432",
           "PGSSLMODE": "require"
@@ -264,6 +304,7 @@ keep `command` as a **string** (not an array):
         "type": "stdio",
         "command": "C:/Users/YOUR_USER/bin/mcp-pg-readonly-run.cmd",
         "args": ["--database", "wb_data_prod"],
+        "timeoutMs": 200000,
         "env": { "PGHOST": "192.168.10.7", "PGPORT": "15432" }
       }
     }
