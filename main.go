@@ -173,6 +173,20 @@ func runSelftest(ctx context.Context, pool *pgxpool.Pool, database string) int {
 	}
 	fmt.Fprintf(os.Stderr, "ok: SELECT 1 -> %d row(s)\n", res.RowCount)
 
+	// Numeric-encoding probe: pgtype.Numeric must render as an exact decimal
+	// string, not fail the query — a live bug let every computed numeric
+	// (round(), numeric division, ::numeric) error with "unexpected type".
+	numRes, nerr := runReadOnly(ctx, pool, "SELECT round(1.23456::numeric, 2) AS r", nil)
+	if nerr != nil {
+		fmt.Fprintf(os.Stderr, "FAIL: numeric probe -> %v\n", nerr)
+		return 1
+	}
+	if numRes.RowCount != 1 || len(numRes.Rows) != 1 || len(numRes.Rows[0]) != 1 || numRes.Rows[0][0] != "1.23" {
+		fmt.Fprintf(os.Stderr, "FAIL: numeric probe: got %v, want [[\"1.23\"]]\n", numRes.Rows)
+		return 1
+	}
+	fmt.Fprintln(os.Stderr, "ok: numeric probe -> round(numeric) as exact string")
+
 	// Write probe. The role + READ ONLY txn must reject this. Any "success"
 	// here is a hard failure of the security boundary.
 	_, werr := runReadOnly(ctx, pool, "CREATE TEMP TABLE _selftest_write_probe (id int)", nil)

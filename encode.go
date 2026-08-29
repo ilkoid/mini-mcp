@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // Common PostgreSQL type OIDs (pg_type). Only the ones that need special
@@ -66,8 +68,9 @@ func encodeCell(v any, asString bool) (interface{}, int, error) {
 	}
 
 	// BIGINT / numeric: emit as JSON string to dodge float64 precision loss.
-	// pgx already decodes int8 → int64 and numeric → *pgtype.Numeric; we also
-	// guard against numeric coming back as string (some configs) or float.
+	// pgx decodes int8 → int64; numeric arrives as a pgtype.Numeric VALUE (not
+	// pointer) via rows.Values() — both must be handled or every computed
+	// numeric (round(), numeric division, ::numeric) fails the whole query.
 	if asString {
 		return encodeNumericAsString(v)
 	}
@@ -142,10 +145,52 @@ func encodeNumericAsString(v any) (interface{}, int, error) {
 	case *big.Int:
 		s := x.String()
 		return s, len(s) + 2, nil
+	case pgtype.Numeric:
+		return encodePgNumeric(x)
+	case *pgtype.Numeric:
+		if x == nil {
+			return nil, 4, nil
+		}
+		return encodePgNumeric(*x)
 	}
 	// Fall back: stringify via fmt. Anything landing here is unexpected for an
 	// int8/numeric column; surface it as an error rather than silently coerce.
 	return nil, 0, fmt.Errorf("unexpected type %T for int8/numeric column", v)
+}
+
+// encodePgNumeric renders the pgtype.Numeric struct pgx hands us for numeric
+// columns as an exact decimal string (never float64 — precision). NULL stays
+// null; NaN/Infinity keep their PG spellings so the value remains truthful.
+func encodePgNumeric(n pgtype.Numeric) (interface{}, int, error) {
+	if !n.Valid {
+		return nil, 4, nil // NULL
+	}
+	if n.NaN {
+		s := "NaN"
+		return s, len(s) + 2, nil
+	}
+	switch n.InfinityModifier {
+	case pgtype.Infinity:
+		s := "Infinity"
+		return s, len(s) + 2, nil
+	case pgtype.NegativeInfinity:
+		s := "-Infinity"
+		return s, len(s) + 2, nil
+	}
+	// driver.Valuer renders the exact text form via the numeric codec's text
+	// format (plain decimal — PG numeric never uses e-notation on output).
+	v, err := n.Value()
+	if err != nil {
+		return nil, 0, fmt.Errorf("render numeric: %w", err)
+	}
+	s, ok := v.(string)
+	if !ok {
+		return nil, 0, fmt.Errorf("non-numeric driver.Value %T for numeric column", v)
+	}
+	if !looksNumeric(strings.TrimSpace(s)) {
+		return nil, 0, fmt.Errorf("non-numeric value %q in numeric/int8 column", s)
+	}
+	return s, len(s) + 2, nil
 }
 
 // looksNumeric is a cheap guard so we don't emit arbitrary strings into a
