@@ -91,7 +91,10 @@ PG_TEST_DSN="postgres://mcp_ro:...@host:port/db?sslmode=disable" \
 ## JSON type encoding (`encode.go`)
 
 - **int8 / numeric → JSON string** (WB `nm_id` exceeds 2^53; float64 would
-  corrupt it). Guarded by `TestEncodeInt8AsString`.
+  corrupt it). Guarded by `TestEncodeInt8AsString`. Agents cast `::int` /
+  `::float8` in SQL when they need a JSON number — this is hinted in the
+  `pg_readonly_query` description (numeric arithmetic like `round(100.0*x/y)`
+  trips on it otherwise).
 - Timestamps → RFC3339 UTC. `json`/`jsonb` embedded raw. `bytea` > 1KB rejected.
 
 ## Conventions

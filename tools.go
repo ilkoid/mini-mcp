@@ -51,7 +51,7 @@ func registerTools(s *mcp.Server, pool *pgxpool.Pool) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "pg_readonly_query",
 		Title:       "Read-only SQL query",
-		Description: "Read-only SQL against PostgreSQL (role mcp_ro, READ ONLY transaction). Returns JSON {columns, rows, row_count, truncated, notice}. Caps: 500 rows / 64KB. Prefer aggregates (GROUP BY / windows) over raw dumps of large fact tables (e.g. sales). Use $1,$2 placeholders for values. For heavier read-only analytics (beyond these caps or near the timeout), run psql directly with the SAME read-only role (mcp_ro, PGPASSWORD=$PG_RO_PWD from ~/.config/mcp-pg-readonly/env — NEVER PG_ADMIN_PWD) and set your own statement_timeout there; the role is SELECT-only, so this stays safe.",
+		Description: "Read-only SQL against PostgreSQL (role mcp_ro, READ ONLY transaction). Returns JSON {columns, rows, row_count, truncated, notice}. Caps: 500 rows / 64KB. int8/numeric values (count(*), sum/avg/round results) arrive as JSON STRINGS to preserve precision — cast ::int or ::float8 in SQL when you need a JSON number (never cast IDs like nm_id to float). Prefer aggregates (GROUP BY / windows) over raw dumps of large fact tables (e.g. sales). Use $1,$2 placeholders for values. For heavier read-only analytics (beyond these caps or near the timeout), run psql directly with the SAME read-only role (mcp_ro, PGPASSWORD=$PG_RO_PWD from ~/.config/mcp-pg-readonly/env — NEVER PG_ADMIN_PWD) and set your own statement_timeout there; the role is SELECT-only, so this stays safe.",
 		Annotations: readOnlyAnnotations,
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in queryInput) (*mcp.CallToolResult, any, error) {
 		args := make([]any, len(in.Args))

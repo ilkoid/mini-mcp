@@ -398,6 +398,11 @@ BIGINT (`int8`) and `numeric` are returned as **JSON strings** to avoid float64
 precision loss (WB `nm_id` values exceed 2^53). Timestamps are RFC3339 UTC.
 `json`/`jsonb` are embedded raw. Large `bytea` (>1KB) is rejected.
 
+Practical consequence for agents: `count(*)`, `sum/avg/round(...)` results are
+int8/numeric and arrive as strings (`"3.4"`). When a JSON number is needed,
+cast in SQL: `round(...)::float8` or `count(*)::int`. Never cast IDs (`nm_id`)
+to float — their string form is the precision-safe representation.
+
 ## UX caveat — approval in plan mode
 
 The ZCode bundle currently sets `needsApproval: true` for **all** MCP tools
