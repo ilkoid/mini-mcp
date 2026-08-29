@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -101,8 +102,12 @@ func TestReadOnly_Int8JSONAsString(t *testing.T) {
 
 func TestReadOnly_StatementTimeout(t *testing.T) {
 	pool := testPool(t)
-	// pg_sleep(35) exceeds the 30s statement_timeout → must error.
-	_, err := runReadOnly(context.Background(), pool, "SELECT pg_sleep(35)", nil)
+	// Shrink statement_timeout for the test instead of waiting 2 minutes for
+	// the flag default to fire; pg_sleep(2) then exceeds it.
+	old := statementTimeout
+	statementTimeout = 500 * time.Millisecond
+	defer func() { statementTimeout = old }()
+	_, err := runReadOnly(context.Background(), pool, "SELECT pg_sleep(2)", nil)
 	if err == nil {
 		t.Fatal("expected statement_timeout error, got nil")
 	}
@@ -117,5 +122,78 @@ func TestReadOnly_BindsParams(t *testing.T) {
 	}
 	if res.RowCount != 1 {
 		t.Fatalf("RowCount=%d", res.RowCount)
+	}
+}
+
+func TestReadOnly_NumericAsString(t *testing.T) {
+	pool := testPool(t)
+	// Computed numerics (round(), typed literals) arrive as exact decimal
+	// strings — they used to fail the whole query with "unexpected type".
+	res, err := runReadOnly(context.Background(), pool,
+		"SELECT round(1.23456::numeric, 2) AS r, 1.5::numeric(10,2) AS n", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.RowCount != 1 || len(res.Rows) != 1 || len(res.Rows[0]) != 2 {
+		t.Fatalf("unexpected shape %+v", res)
+	}
+	if res.Rows[0][0] != "1.23" || res.Rows[0][1] != "1.50" {
+		t.Fatalf("numeric not exact string: got %v", res.Rows[0])
+	}
+}
+
+func TestReadOnly_SemicolonInLiteral(t *testing.T) {
+	pool := testPool(t)
+	res, err := runReadOnly(context.Background(), pool, "SELECT 'a;b' AS s", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.RowCount != 1 || len(res.Rows) != 1 || len(res.Rows[0]) != 1 {
+		t.Fatalf("unexpected shape %+v", res)
+	}
+	// Text cells are json.RawMessage on the wire — compare the marshaled form.
+	b, err := json.Marshal(res.Rows[0][0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != `"a;b"` {
+		t.Fatalf("unexpected value %s", b)
+	}
+}
+
+func TestReadOnly_ByteCapSingleBigRow(t *testing.T) {
+	pool := testPool(t)
+	res, err := runReadOnly(context.Background(), pool, "SELECT repeat('x', 100000) AS big", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Truncated || res.RowCount != 0 {
+		t.Fatalf("want truncated empty result, got %+v", res)
+	}
+	if !strings.Contains(res.Notice, "single row") {
+		t.Fatalf("notice should explain the single-row cap: %q", res.Notice)
+	}
+}
+
+func TestReadOnly_ByteCapManyRows(t *testing.T) {
+	pool := testPool(t)
+	res, err := runReadOnly(context.Background(), pool,
+		"SELECT rpad('a', 150) AS pad FROM generate_series(1, 600)", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Truncated || res.RowCount == 0 {
+		t.Fatalf("want truncated non-empty result, got %+v", res)
+	}
+	if !strings.Contains(res.Notice, "server cap") {
+		t.Fatalf("generic cap notice expected: %q", res.Notice)
+	}
+}
+
+func TestReadOnly_DescribeNotFound(t *testing.T) {
+	pool := testPool(t)
+	_, err := describeTable(context.Background(), pool, "public", "no_such_table_xyz")
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("want not-found error, got %v", err)
 	}
 }

@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/big"
 	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 func TestRejectUnsafeSQL_Empty(t *testing.T) {
@@ -76,6 +78,106 @@ func TestRejectUnsafeSQL_ReadStatementsOK(t *testing.T) {
 	for _, in := range cases {
 		if err := rejectUnsafeSQL(in); err != nil {
 			t.Fatalf("expected OK for %q, got %v", in, err)
+		}
+	}
+}
+
+func TestRejectUnsafeSQL_SemicolonInLiteralsAndComments(t *testing.T) {
+	// A ';' inside data is not a statement separator.
+	cases := []string{
+		`SELECT 'a;b' AS s`,
+		`SELECT $$a;b$$ AS s`,
+		`SELECT $tag$a;b$tag$ AS s`,
+		`SELECT 'don''t;' AS s`,
+		`SELECT E'a\';b' AS s`,
+		"SELECT 1 -- ; not a separator\n+ 2",
+		`/* ; */ SELECT 1`,
+		`SELECT string_to_array('a;b', ';')`,
+		`SELECT 'semi;colon';`,
+	}
+	for _, in := range cases {
+		if err := rejectUnsafeSQL(in); err != nil {
+			t.Fatalf("expected OK for %q, got %v", in, err)
+		}
+	}
+}
+
+func TestRejectUnsafeSQL_RealSeparatorsStillRejected(t *testing.T) {
+	cases := []string{
+		`SELECT 'a'; DROP TABLE x`,
+		`SELECT 'a' ;SELECT 1`,
+		`SELECT $$x$$; SELECT 2`,
+	}
+	for _, in := range cases {
+		if err := rejectUnsafeSQL(in); err == nil {
+			t.Fatalf("expected rejection for %q", in)
+		}
+	}
+}
+
+func TestRejectUnsafeSQL_CommentLeadingKeyword(t *testing.T) {
+	// Comments must not hide the real first keyword from the precheck.
+	for _, in := range []string{
+		"-- note\nDROP TABLE t",
+		"/* hi */ DELETE FROM t",
+	} {
+		if err := rejectUnsafeSQL(in); err == nil {
+			t.Fatalf("expected rejection for %q", in)
+		}
+	}
+	if err := rejectUnsafeSQL("/* hi */ SELECT 1"); err != nil {
+		t.Fatalf("expected OK, got %v", err)
+	}
+}
+
+func TestRejectUnsafeSQL_SessionStatementsRejected(t *testing.T) {
+	for _, in := range []string{
+		"SET statement_timeout = 0",
+		"SET LOCAL work_mem = '1GB'",
+		"RESET ALL",
+		"DISCARD ALL",
+		"PREPARE p AS SELECT 1",
+		"EXECUTE p",
+		"LISTEN chan",
+		"NOTIFY chan",
+		"LOCK TABLE t",
+		"CHECKPOINT",
+		"BEGIN",
+		"COMMIT",
+	} {
+		if err := rejectUnsafeSQL(in); err == nil {
+			t.Fatalf("expected rejection for %q", in)
+		}
+	}
+	// Read-only session introspection stays allowed.
+	for _, in := range []string{"SHOW statement_timeout", "EXPLAIN SELECT 1"} {
+		if err := rejectUnsafeSQL(in); err != nil {
+			t.Fatalf("expected OK for %q, got %v", in, err)
+		}
+	}
+}
+
+func TestMaskLiteralsAndComments(t *testing.T) {
+	// Everything inside literals/comments vanishes; real syntax survives.
+	cases := map[string]string{
+		`SELECT 'a;b'`:          `SELECT`,
+		`SELECT $$a;b$$`:        `SELECT`,
+		`SELECT $tag$a;$tag$ b`: `SELECT b`,
+		`SELECT 'don''t;'`:      `SELECT`,
+		`SELECT E'\';b'`:        `SELECT`,
+		`SELECT xe';y'`:         `SELECT xe`, // glued E is an identifier, then a plain string
+		"SELECT 1 -- ;x\n+2":    "SELECT 1 \n+2",
+		`/* ; */ SELECT $1`:     `SELECT $1`,
+		`SELECT $1, 'x'`:        `SELECT $1,`,
+		`SELECT "c;d"`:          `SELECT`,
+	}
+	for in, want := range cases {
+		got := maskLiteralsAndComments(in)
+		if len(got) != len(in) {
+			t.Fatalf("mask(%q) changed length: %q", in, got)
+		}
+		if g, w := strings.Join(strings.Fields(got), " "), strings.Join(strings.Fields(want), " "); g != w {
+			t.Fatalf("mask(%q) fields = %q, want %q", in, g, w)
 		}
 	}
 }
@@ -150,6 +252,76 @@ func TestEncodeNumericAsString(t *testing.T) {
 	b, _ := jsonMarshal(row[0])
 	if s := string(b); s != `"12345678901234567890.12"` {
 		t.Fatalf("numeric not encoded as string: got %s", s)
+	}
+}
+
+func TestEncodePgtypeNumeric(t *testing.T) {
+	// pgx v5 hands numeric columns to rows.Values() as pgtype.Numeric VALUES —
+	// the exact type that used to fall through to the "unexpected type" error.
+	e := newRowEncoder([]uint32{oidNumeric})
+	bigSum, ok := new(big.Int).SetString("9007199254740993", 10) // 2^53+1
+	if !ok {
+		t.Fatal("big.Int.SetString failed")
+	}
+	cases := []struct {
+		in   any
+		want string // expected JSON rendering
+	}{
+		{pgtype.Numeric{Int: big.NewInt(150), Exp: -2, Valid: true}, `"1.50"`},
+		{pgtype.Numeric{Int: big.NewInt(-271828), Exp: -5, Valid: true}, `"-2.71828"`},
+		{pgtype.Numeric{Int: bigSum, Valid: true}, `"9007199254740993"`},
+		{pgtype.Numeric{Valid: false}, `null`},                    // NULL
+		{pgtype.Numeric{NaN: true, Valid: true}, `"NaN"`},         // NaN
+		{(*pgtype.Numeric)(nil), `null`},                          // nil pointer
+		{&pgtype.Numeric{Int: big.NewInt(42), Valid: true}, `"42"`}, // pointer form
+	}
+	for _, c := range cases {
+		row, _, err := e.encode([]any{c.in})
+		if err != nil {
+			t.Fatalf("encode(%#v): %v", c.in, err)
+		}
+		b, err := jsonMarshal(row[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(b) != c.want {
+			t.Fatalf("encode(%#v) = %s, want %s", c.in, b, c.want)
+		}
+	}
+}
+
+func TestResultFieldOrder_MetadataBeforeRows(t *testing.T) {
+	// The ZCode client truncates oversized tool output by chopping the JSON
+	// tail; row_count/truncated/notice must precede rows to survive that.
+	b, err := jsonMarshal(&Result{
+		Columns: []string{"c"}, RowCount: 1, Truncated: true, Notice: "n",
+		Rows: [][]interface{}{{1}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	rowsAt := strings.Index(s, `"rows"`)
+	if rowsAt < 0 {
+		t.Fatalf("no rows field in %s", s)
+	}
+	for _, key := range []string{`"columns"`, `"row_count"`, `"truncated"`, `"notice"`} {
+		if at := strings.Index(s, key); at < 0 || at > rowsAt {
+			t.Fatalf("%s must precede \"rows\" in %s", key, s)
+		}
+	}
+}
+
+func TestTruncationNotice(t *testing.T) {
+	big := truncationNotice(maxBytes + 1)
+	if !strings.Contains(big, "single row") || !strings.Contains(big, "substring()") {
+		t.Fatalf("single-row notice wrong: %q", big)
+	}
+	for _, chunk := range []int{0, 100, maxBytes} { // row-cap and mid-stream cases
+		gen := truncationNotice(chunk)
+		if !strings.Contains(gen, "maxRows") || strings.Contains(gen, "single row") {
+			t.Fatalf("generic notice wrong for chunk=%d: %q", chunk, gen)
+		}
 	}
 }
 

@@ -51,7 +51,7 @@ func registerTools(s *mcp.Server, pool *pgxpool.Pool) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "pg_readonly_query",
 		Title:       "Read-only SQL query",
-		Description: "Read-only SQL against PostgreSQL (role mcp_ro, READ ONLY transaction). Returns JSON {columns, rows, row_count, truncated, notice}. Caps: 500 rows / 64KB. int8/numeric values (count(*), sum/avg/round results) arrive as JSON STRINGS to preserve precision — cast ::int or ::float8 in SQL when you need a JSON number (never cast IDs like nm_id to float). Prefer aggregates (GROUP BY / windows) over raw dumps of large fact tables (e.g. sales). Use $1,$2 placeholders for values. For heavier read-only analytics (beyond these caps or near the timeout), run psql directly with the SAME read-only role (mcp_ro, PGPASSWORD=$PG_RO_PWD from ~/.config/mcp-pg-readonly/env — NEVER PG_ADMIN_PWD) and set your own statement_timeout there; the role is SELECT-only, so this stays safe.",
+		Description: "Read-only SQL against PostgreSQL (role mcp_ro, READ ONLY transaction). Returns JSON {columns, row_count, truncated, notice, rows}. Caps: 500 rows / 48KB. int8/numeric values (count(*), sum/avg/round results) arrive as JSON STRINGS to preserve precision — cast ::int or ::float8 in SQL when you need a JSON number (never cast IDs like nm_id to float). Prefer aggregates (GROUP BY / windows) over raw dumps of large fact tables (e.g. sales). Use $1,$2 placeholders for values. For heavier read-only analytics (beyond these caps or near the timeout), run psql directly with the SAME read-only role (mcp_ro, PGPASSWORD=$PG_RO_PWD from ~/.config/mcp-pg-readonly/env — NEVER PG_ADMIN_PWD) and set your own statement_timeout there; the role is SELECT-only, so this stays safe.",
 		Annotations: readOnlyAnnotations,
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in queryInput) (*mcp.CallToolResult, any, error) {
 		args := make([]any, len(in.Args))
@@ -186,6 +186,11 @@ func describeTable(ctx context.Context, pool *pgxpool.Pool, schema, table string
 		ORDER BY ordinal_position`, []any{schema, table})
 	if err != nil {
 		return nil, fmt.Errorf("columns: %w", err)
+	}
+	if colRes.RowCount == 0 {
+		// PG tables always have ≥1 column; zero rows here means the table
+		// doesn't exist (or isn't visible to mcp_ro).
+		return nil, fmt.Errorf("table %q not found in schema %q (use pg_list_tables to discover tables)", table, schema)
 	}
 	for _, row := range colRes.Rows {
 		c := tableColumn{}

@@ -61,14 +61,22 @@ PG_TEST_DSN="postgres://mcp_ro:...@host:port/db?sslmode=disable" \
    re-audit before shipping.
 
 4. **Single-statement SQL only.** `rejectUnsafeSQL` rejects empty, multi
-   statement (any `;` other than one optional trailing), and leading non-read
-   keywords. Agents must pass values via `$1,$2` params, not inline. Keep this
-   rule when editing.
+   statement (any real `;` other than one optional trailing — semicolons
+   inside string literals / dollar-quotes / comments are data, not
+   separators; checks run on a `maskLiteralsAndComments` copy), and leading
+   non-read keywords (incl. session statements: SET/RESET/DISCARD/PREPARE/
+   BEGIN/…; SHOW and EXPLAIN are deliberately allowed). Agents must pass
+   values via `$1,$2` params, not inline. Keep this rule when editing.
 
-5. **Fixed result envelope.** `Result{columns, rows, row_count, truncated,
-   notice}` is the contract with the agent. Caps: `maxRows=500`,
-   `maxBytes=64KB`. Double truncation (server cap + ZCode client budget) is
-   intentional; keep server caps ≤ client budget.
+5. **Fixed result envelope.** `Result{columns, row_count, truncated, notice,
+   rows}` is the contract with the agent — metadata BEFORE rows by design:
+   the ZCode client chops the JSON tail of oversized output (~50KB
+   resultBudget), and this order keeps `truncated`/`notice` readable when
+   that happens. Caps: `maxRows=500`, `maxBytes=48KB` (must stay below the
+   client budget incl. envelope overhead). Double truncation (server cap +
+   client budget) is intentional; keep server caps ≤ client budget. A single
+   row exceeding `maxBytes` on its own gets a dedicated notice (suggest
+   `length()/left()/substring()`), distinct from the too-many-rows notice.
 
 6. **Pool discipline.** `MaxConns = 1` per stdio process (tool calls are
    serial). Role `CONNECTION LIMIT = 8` covers several sessions + inspector +
