@@ -113,6 +113,28 @@ for the agent's iterative, bounded-result exploration, not batch analytics.
 Output caps (500 rows / 64KB, then ZCode's own result budget) are **not**
 timeouts — a slow-but-successful query can still come back truncated. By design.
 
+### Heavy read-only analytics — psql bypass
+
+When a SELECT is too big for the MCP caps (huge GROUP BY, multi-minute scan),
+run it directly through `psql` with the **same read-only role** — the `mcp_ro`
+grants still apply, so nothing can be written. This path is also mentioned in
+the `pg_readonly_query` tool description so the agent can find it on its own.
+
+```bash
+# macOS / Linux — heavy SELECT bypassing MCP caps (still SELECT-only via mcp_ro)
+set -a; source ~/.config/mcp-pg-readonly/env; set +a
+PGPASSWORD="$PG_RO_PWD" PGOPTIONS='-c statement_timeout=10min' \
+  psql -h 192.168.10.7 -p 15432 -U mcp_ro -d wb_data_prod \
+  -c "SELECT date_trunc('day', dt) AS day, count(*), sum(price) FROM sales GROUP BY 1"
+```
+
+- `PGOPTIONS` sets the session's own `statement_timeout` — the MCP timeouts
+  don't apply here, so pick one explicitly instead of running unbounded.
+- Use **`$PG_RO_PWD` / role `mcp_ro` only**. `PG_ADMIN_PWD` lives in the same
+  env file but is for bootstrap/maintenance, never for agent-driven queries.
+- On the Windows VPS the same works if `psql` is installed there — source the
+  vars from `%USERPROFILE%\.config\mcp-pg-readonly\env.cmd` first.
+
 ## Register in ZCode (user scope)
 
 Create/edit **`~/.zcode/cli/config.json`** (NOT `~/.zcode/v2/config.json` —
