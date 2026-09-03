@@ -11,7 +11,7 @@ non-destructive tools over stdio JSON-RPC:
 
 Read-only is enforced **at the database** by a dedicated `mcp_ro` role (see
 `role-bootstrap.sql`). The server adds belt-and-suspenders: a `READ ONLY`
-transaction, a 2min `statement_timeout`, and 500-row / 64KB output caps. SQL
+transaction, a 2min `statement_timeout`, and 500-row / 48KB output caps. SQL
 parsing is **not** the security boundary — it's only a DX precheck.
 
 ## Paths
@@ -110,7 +110,7 @@ and while one runs, that session's next tool call waits (pool `MaxConns=1`).
 For genuinely heavy reports, use `psql` under `mcp_ro` directly — MCP is built
 for the agent's iterative, bounded-result exploration, not batch analytics.
 
-Output caps (500 rows / 64KB, then ZCode's own result budget) are **not**
+Output caps (500 rows / 48KB, then ZCode's own result budget) are **not**
 timeouts — a slow-but-successful query can still come back truncated. By design.
 
 ### Heavy read-only analytics — psql bypass
@@ -235,6 +235,10 @@ server — each entry differs only by `PGHOST` / `PGPORT` / `PGSSLMODE` /
 > `~/.config/mcp-pg-readonly/env.d/<name>` and point each server's `env` at it.
 
 ## Windows (VPS)
+
+> Full from-scratch walkthrough — prerequisites, networking to the PG host,
+> secrets/ACL, git rules, troubleshooting, checklist (in Russian):
+> **[DEPLOY-WINDOWS.md](DEPLOY-WINDOWS.md)**. The section below is the quick version.
 
 The repo ships two launchers with identical behavior — pick the one matching
 your platform:

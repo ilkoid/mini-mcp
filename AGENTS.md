@@ -35,6 +35,7 @@ PG_TEST_DSN="postgres://mcp_ro:...@host:port/db?sslmode=disable" \
 | `mcp-pg-readonly-run.cmd` | Windows equivalent of `.sh`. Sources `%USERPROFILE%\.config\mcp-pg-readonly\env.cmd` (note: `.cmd` ext, `set` syntax — NOT `export`), then execs `mcp-pg-readonly.exe`. Same `MCP_PG_SECRETS` override. |
 | `.gitattributes` | CRLF hygiene: `*.cmd`/`*.bat` forced to CRLF (cmd breaks on LF), everything else LF, `*.exe` binary. |
 | `*_test.go` | Unit (`ro_test.go`, `tools_test.go`) + integration (`ro_integration_test.go`, needs `PG_TEST_DSN`). |
+| `DEPLOY-WINDOWS.md` | Full from-scratch Windows VPS deploy guide (Russian): prerequisites, network to the PG host, secrets/ACL, role bootstrap, ZCode registration, git/secrets rules, troubleshooting, checklist. Keep in sync with the README "Windows (VPS)" quick section when behavior changes. |
 
 ## Architecture rules that matter for edits
 
