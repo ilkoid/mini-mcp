@@ -105,7 +105,7 @@ func main() {
 		Title:   "PostgreSQL read-only",
 		Version: "0.1.0",
 	}, nil)
-	registerTools(server, pool)
+	registerTools(server, pool, *user, *pwdEnvName)
 
 	ctx := context.Background()
 	if err := server.Run(ctx, &mcp.StdioTransport{}); err != nil {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -83,5 +84,28 @@ func TestToolAnnotations_SDKTypeShape(t *testing.T) {
 	}
 	if out["readOnlyHint"] != true {
 		t.Fatalf("readOnlyHint did not round-trip as true: %s", b)
+	}
+}
+
+// TestQueryDescriptionFmt_InterpolatesRole guards the psql-bypass hint: the
+// pg_readonly_query description must name the role and password env the entry
+// actually runs as (mcp_ro/PG_RO_PWD locally, arm_ai_ro/PG_USER_PWD on the
+// poncho-ai prod instance). A hardcoded role name would send the agent after
+// credentials that don't exist on that host.
+func TestQueryDescriptionFmt_InterpolatesRole(t *testing.T) {
+	if strings.Contains(queryDescriptionFmt, "mcp_ro") || strings.Contains(queryDescriptionFmt, "PG_RO_PWD") {
+		t.Fatal("queryDescriptionFmt hardcodes a role/env name — keep the parameterized placeholders")
+	}
+	for _, tc := range []struct{ role, pwdEnv string }{
+		{"mcp_ro", "PG_RO_PWD"},
+		{"arm_ai_ro", "PG_USER_PWD"},
+	} {
+		desc := fmt.Sprintf(queryDescriptionFmt, tc.role, tc.role, tc.pwdEnv)
+		if !strings.Contains(desc, "role "+tc.role+", READ ONLY") {
+			t.Fatalf("role %s: description does not name it", tc.role)
+		}
+		if !strings.Contains(desc, "PGPASSWORD=$"+tc.pwdEnv) {
+			t.Fatalf("role %s: description does not name password env %s", tc.role, tc.pwdEnv)
+		}
 	}
 }

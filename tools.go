@@ -46,12 +46,21 @@ type describeTableInput struct {
 	Table  string `json:"table" jsonschema:"table name to describe"`
 }
 
-// registerTools wires the three read-only tools onto the server.
-func registerTools(s *mcp.Server, pool *pgxpool.Pool) {
+// queryDescriptionFmt is the pg_readonly_query description. The role and the
+// password-env name are interpolated from --user / --password-env so the
+// psql-bypass hint always matches the role this entry actually runs as
+// (mcp_ro locally, e.g. arm_ai_ro on the poncho-ai prod instance). Never
+// hardcode a role/env name here — a wrong hint sends the agent after
+// credentials that don't exist on that host.
+const queryDescriptionFmt = "Read-only SQL against PostgreSQL (role %s, READ ONLY transaction). Returns JSON {columns, row_count, truncated, notice, rows}. Caps: 500 rows / 48KB. int8/numeric values (count(*), sum/avg/round results) arrive as JSON STRINGS to preserve precision — cast ::int or ::float8 in SQL when you need a JSON number (never cast IDs like nm_id to float). Prefer aggregates (GROUP BY / windows) over raw dumps of large fact tables (e.g. sales). Use $1,$2 placeholders for values. For heavier read-only analytics (beyond these caps or near the timeout), run psql directly with the SAME read-only role (%s, PGPASSWORD=$%s — NEVER the admin password) and set your own statement_timeout there; the role is SELECT-only, so this stays safe."
+
+// registerTools wires the three read-only tools onto the server. role/pwdEnv
+// feed the description (see queryDescriptionFmt).
+func registerTools(s *mcp.Server, pool *pgxpool.Pool, role, pwdEnv string) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "pg_readonly_query",
 		Title:       "Read-only SQL query",
-		Description: "Read-only SQL against PostgreSQL (role mcp_ro, READ ONLY transaction). Returns JSON {columns, row_count, truncated, notice, rows}. Caps: 500 rows / 48KB. int8/numeric values (count(*), sum/avg/round results) arrive as JSON STRINGS to preserve precision — cast ::int or ::float8 in SQL when you need a JSON number (never cast IDs like nm_id to float). Prefer aggregates (GROUP BY / windows) over raw dumps of large fact tables (e.g. sales). Use $1,$2 placeholders for values. For heavier read-only analytics (beyond these caps or near the timeout), run psql directly with the SAME read-only role (mcp_ro, PGPASSWORD=$PG_RO_PWD from ~/.config/mcp-pg-readonly/env — NEVER PG_ADMIN_PWD) and set your own statement_timeout there; the role is SELECT-only, so this stays safe.",
+		Description: fmt.Sprintf(queryDescriptionFmt, role, role, pwdEnv),
 		Annotations: readOnlyAnnotations,
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in queryInput) (*mcp.CallToolResult, any, error) {
 		args := make([]any, len(in.Args))

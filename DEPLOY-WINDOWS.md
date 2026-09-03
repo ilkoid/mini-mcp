@@ -16,14 +16,16 @@ ZCode (%USERPROFILE%\.zcode\cli\config.json)
                 ├─ call %USERPROFILE%\.config\mcp-pg-readonly\env.cmd
                 │    (set PG_RO_PWD=…  — пароль живёт ТОЛЬКО здесь)
                 └─ %USERPROFILE%\bin\mcp-pg-readonly.exe --database …
-                      └─ PostgreSQL, роль mcp_ro (SELECT-only)
+                      └─ PostgreSQL, роль только-чтения
+                         (по умолчанию mcp_ro; для прода poncho-ai — arm_ai_ro, раздел 5)
 ```
 
 Принципы, которые надо понимать до начала:
 
-- **Граница безопасности — роль `mcp_ro` в самой БД**, а не SQL-парсер в
-  сервере. SQL-проверка — это UX-пречек. Поэтому bootstrap роли (раздел 5) —
-  не опциональная «лучшие практики», а обязательный шаг, если PG-инстанс новый.
+- **Граница безопасности — роль только-чтения в самой БД**, а не SQL-парсер в
+  сервере. SQL-проверка — это UX-пречек. Поэтому либо bootstrap роли (раздел 5,
+  вариант В для нового инстанса), либо проверенная существующая RO-роль
+  (вариант Б — например, `arm_ai_ro` на проде poncho-ai).
 - **Wrapper существует, чтобы пароль не жил в config.json** рядом с ключами
   провайдеров, и чтобы путь `command` оставался стабильным.
 - **Один MCP-процесс = одна база** (`--database` обязателен; молчаливого
@@ -50,7 +52,7 @@ psql-обход). Возможности и ограничения — в раз
    - применить: `SELECT pg_reload_conf();` (под админом)
    - открыть порт в firewall PG-хоста.
 3. **Свой PG прямо на VPS** → `PGHOST=127.0.0.1`, тогда обязательно раздел 5
-   (bootstrap роли с нуля).
+   (bootstrap роли с нуля, вариант В).
 
 Проверка достижимости с VPS (PowerShell — только для диагностики, сам wrapper
 всегда запускается под cmd.exe):
@@ -151,14 +153,52 @@ icacls "%USERPROFILE%\.config\mcp-pg-readonly\env.cmd" /inheritance:r /grant:r "
 - Если VPS подключается к **существующему** PG (192.168.10.7) — роль `mcp_ro`
   там уже создана; используйте **тот же пароль**, что на Mac (взять из
   `~/.config/mcp-pg-readonly/env`, передать по RDP/менеджеру секретов, не
-  через git/чат/issue) — и раздел 5 пропустите.
+  через git/чат/issue) — и раздел 5 пропустите. Для проду poncho-ai
+  (`10.120.24.155`) свой расклад — роль `arm_ai_ro`, пароль из `PG_USER_PWD`:
+  это вариант Б раздела 5, сюда добавляется `set PG_USER_PWD=...`.
 - Путь к секретам можно переопределить переменной `MCP_PG_SECRETS`, если
   держите несколько файлов (по одному на хост с разными паролями).
 
-## 5. Роль mcp_ro — только если на этом VPS свой PG-инстанс
+## 5. Роль для чтения на PG — три варианта
 
-Под существующий PG роль уже есть — пропускайте. Для своего инстанса,
-под админом, по каждой базе (сначала test, потом прод — осознанно):
+**Вариант А — существующий PG с общей ролью `mcp_ro` (192.168.10.7:15432).**
+Роль уже создана; используйте тот же пароль, что на Mac (раздел 4). Ничего
+делать не надо, остальной раздел пропустите.
+
+**Вариант Б — существующий PG со своей read-only ролью.** Реальный кейс: прод
+poncho-ai — `10.120.24.155:5432`, база `wb_data_prod`, роль **`arm_ai_ro`**,
+пароль в переменной **`PG_USER_PWD`** (живёт в env/.env прод-машины).
+Bootstrap не нужен — бинарник умеет любую роль через флаги:
+
+- env.cmd (раздел 4) дополняется строкой `set PG_USER_PWD=<пароль arm_ai_ro>`;
+- entry в config.json (раздел 7): `"PGHOST": "10.120.24.155"`,
+  `"PGPORT": "5432"`, args `--user arm_ai_ro --password-env PG_USER_PWD
+  --database wb_data_prod`;
+- selftest (раздел 6) — тот же wrapper с теми же флагами:
+  `mcp-pg-readonly-run.cmd --selftest --database wb_data_prod --user arm_ai_ro --password-env PG_USER_PWD`;
+- описание инструмента `pg_readonly_query` само подставляет фактические роль
+  и имя env-переменной — psql-подсказка агента не укажет на чужие креды;
+- **проверьте, что роль действительно SELECT-only.** Write-probe в selftest
+  проверяет READ ONLY-транзакцию сервера, а не гранты роли, а psql-обход
+  (раздел 9) безопасен ровно постольку, поскольку роль не умеет писать.
+  Один раз под `arm_ai_ro` (через psql или сам MCP):
+
+  ```sql
+  SELECT table_schema, table_name, privilege_type
+  FROM information_schema.role_table_grants
+  WHERE grantee = current_user AND privilege_type <> 'SELECT';
+  ```
+
+  Пустой результат → действительно read-only. Непустой → лишние гранты
+  отобрать у роли, иначе psql-обход перестаёт быть безопасным;
+- роль может параллельно использоваться другими процессами (прод-профиль,
+  psql) — это нормально: один MCP-процесс держит ровно одно соединение
+  (`MaxConns=1`);
+- сеть: `10.120.24.155` должен быть достижим с VPS (раздел 1); при доступе
+  не по LAN/тоннелю — `"PGSSLMODE": "require"` в env entry.
+
+**Вариант В — свой PG-инстанс прямо на этом VPS** → bootstrap роли `mcp_ro`.
+Под админом, по каждой базе (сначала test, потом прод — осознанно):
 
 ```cmd
 set PG_RO_PWD=<32-hex пароль>
@@ -168,7 +208,7 @@ set PG_ADMIN_PWD=<пароль postgres>
   -f %USERPROFILE%\dev\mini-mcp\role-bootstrap.sql
 ```
 
-(путь к psql/порт — под свою установку)
+(путь к psql/порт — под свою установку; камни ниже относятся к варианту В)
 
 Камни bootstrap:
 
@@ -204,6 +244,8 @@ selftest: PASS
 
 Write probe **обязан** упасть — это сквозная проверка read-only границы.
 Затем то же самое с `--database wb_data_prod` (осознанно, отдельным вызовом).
+Для варианта Б selftest зовётся с ролью этого PG:
+`mcp-pg-readonly-run.cmd --selftest --database wb_data_prod --user arm_ai_ro --password-env PG_USER_PWD`.
 
 Типичные ошибки здесь: `error: empty password` → кавычки/спецсимвол в env.cmd
 или ACL не тому пользователю; `ping: failed to connect` → сеть/pg_hba/firewall
@@ -257,6 +299,20 @@ Write probe **обязан** упасть — это сквозная прове
 - Пароля в этом JSON нет и не должно быть.
 - Схема строгая: неизвестные ключи → весь сервер выкидывается из списка.
 
+Вариант Б (существующая роль, прод poncho-ai) — отдельный entry, отличается
+ролью/хостом; в env.cmd уже лежит `set PG_USER_PWD=...` (раздел 4–5):
+
+```jsonc
+"pg-readonly-arm": {
+  "type": "stdio",
+  "command": "C:/Users/ВАШ_ЮЗЕР/bin/mcp-pg-readonly-run.cmd",
+  "args": ["--database", "wb_data_prod",
+           "--user", "arm_ai_ro", "--password-env", "PG_USER_PWD"],
+  "timeoutMs": 200000,
+  "env": { "PGHOST": "10.120.24.155", "PGPORT": "5432" }
+}
+```
+
 После правки — **полный перезапуск ZCode** → Settings → MCP: оба сервера
 зелёные, `toolCount: 3`.
 
@@ -305,8 +361,9 @@ set PGOPTIONS=-c statement_timeout=10min
 
   `PGOPTIONS` задаёт свой таймаут сессии (MCP-шные две минуты тут не
   действуют) — задавайте явно, не бегайте безлимитно. Роль SELECT-only, так
-  что этот путь так же безопасен, как MCP. **Только `$PG_RO_PWD`/`mcp_ro`**,
-  никогда `PG_ADMIN_PWD`.
+  что этот путь так же безопасен, как MCP. **Только пароль read-only роли**,
+  никогда админский. Для варианта Б это те же креды, что у MCP-entry:
+  `set PGPASSWORD=%PG_USER_PWD%`, `-U arm_ai_ro -h 10.120.24.155 -p 5432`.
 
 - Пока один запрос выполняется, следующий вызов в той же сессии ждёт
   (`MaxConns=1` — вызовы инструмента серийны).
@@ -374,8 +431,9 @@ copy /Y mcp-pg-readonly-run.cmd %USERPROFILE%\bin\mcp-pg-readonly-run.cmd
 - [ ] Git, Go ≥ 1.25, (опц. psql) установлены; новое окно терминала
 - [ ] `git clone` → `go build` → wrapper скопирован в `%USERPROFILE%\bin`
 - [ ] `go test ./...` зелёный
-- [ ] env.cmd: `set` без кавычек, hex-пароль, icacls закрыт
+- [ ] env.cmd: `set` без кавычек, hex-пароль, icacls закрыт (вариант Б: + `set PG_USER_PWD=…`)
 - [ ] (свой PG) role-bootstrap.sql по test → прод, с реальным владельцем таблиц
+- [ ] (вариант Б) grants-проверка `arm_ai_ro` пустая; selftest с `--user arm_ai_ro --password-env PG_USER_PWD` — PASS
 - [ ] Selftest PASS на test, затем на прод
 - [ ] config.json: `cli` (не v2), command-строка на `.cmd`, `timeoutMs: 200000`, отдельные имена prod/test
 - [ ] Полный рестарт ZCode → оба сервера зелёные, `toolCount: 3`

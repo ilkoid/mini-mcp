@@ -222,12 +222,43 @@ server — each entry differs only by `PGHOST` / `PGPORT` / `PGSSLMODE` /
 
 - **Bootstrap the `mcp_ro` role on every host** with `role-bootstrap.sql`.
   That role is the security boundary — its absence means no read-only
-  guarantee, just SQL parsing.
+  guarantee, just SQL parsing. (Or point the entry at an existing, verified
+  RO role — see the next subsection.)
 - **Use `PGSSLMODE=require` (or `verify-full`) over the open internet.**
   `disable` is only fine on a LAN/trusted tunnel.
 - **Distinct server names per DB** so a selftest can never hit the wrong host.
 - **Keep the password out of `config.json`** — it stays in the shared
   `~/.config/mcp-pg-readonly/env`.
+
+### Existing read-only role instead of `mcp_ro`
+
+A host may already have its own RO role — e.g. the poncho-ai prod instance
+(`10.120.24.155:5432`, db `wb_data_prod`) runs `arm_ai_ro` with the password
+in `PG_USER_PWD`. No bootstrap needed; point the entry at that role:
+
+```jsonc
+"pg-readonly-arm": {
+  "type": "stdio",
+  "command": "/Users/ilkoid/bin/mcp-pg-readonly-run",   // .cmd on Windows
+  "args": ["--database", "wb_data_prod",
+           "--user", "arm_ai_ro", "--password-env", "PG_USER_PWD"],
+  "timeoutMs": 200000,
+  "env": { "PGHOST": "10.120.24.155", "PGPORT": "5432" }
+}
+```
+
+The wrapper's secrets file gains a matching line (`export PG_USER_PWD='...'`
+on Unix, `set PG_USER_PWD=...` — no quotes — on Windows). The
+`pg_readonly_query` description interpolates the actual role + password-env
+name, so the psql-bypass hint always names the right credentials. That bypass
+inherits whatever the role can do, so verify the role really is SELECT-only
+first (empty result = safe):
+
+```sql
+SELECT table_schema, table_name, privilege_type
+FROM information_schema.role_table_grants
+WHERE grantee = current_user AND privilege_type <> 'SELECT';
+```
 
 > Per-host password instead of a shared one? The wrapper sources a secrets file
 > whose path can be overridden per server via `MCP_PG_SECRETS` (see

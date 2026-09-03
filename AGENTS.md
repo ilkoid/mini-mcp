@@ -124,6 +124,16 @@ path string (not an array). Prod and test are different server names
 stays out of that JSON — the wrapper sources it. Each entry carries
 `"timeoutMs": 200000` (see rule 7).
 
+An entry may run as a different **existing** read-only role instead of
+`mcp_ro` via `--user` / `--password-env` (e.g. poncho-ai prod:
+`arm_ai_ro` / `PG_USER_PWD`, `10.120.24.155:5432`, db `wb_data_prod`).
+`tools.go` interpolates the role + env-var name into the `pg_readonly_query`
+description (`queryDescriptionFmt`) — keep them parameterized when editing
+that text; a hardcoded `mcp_ro` misdirects the agent's psql bypass on other
+roles. The psql bypass is only as safe as the role's grants, so an
+existing-role entry presumes the role was verified SELECT-only
+(`role_table_grants` check, see README / DEPLOY-WINDOWS.md variant Б).
+
 ## Cross-platform (Unix ↔ Windows)
 
 - **Two launchers, one binary.** `mcp-pg-readonly-run.sh` (Unix) and
