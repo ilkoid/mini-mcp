@@ -7,6 +7,9 @@ poncho-ai. The folder is `mini-mcp`; the module/binary name is `mcp-pg-readonly`
 deliberately, so the user-scope MCP `command` path stays stable across repo
 renames. Full design: `/Users/ilkoid/dev/poncho-ai/reports/2026-07-25_mcp-pg-readonly-design.md`.
 
+The repo also hosts the sibling module **`mcp-websearch/`** — a quota-free
+local web search / page reader MCP (see the last table row).
+
 ## Build, test, run
 
 ```bash
@@ -36,6 +39,7 @@ PG_TEST_DSN="postgres://mcp_ro:...@host:port/db?sslmode=disable" \
 | `.gitattributes` | CRLF hygiene: `*.cmd`/`*.bat` forced to CRLF (cmd breaks on LF), everything else LF, `*.exe` binary. |
 | `*_test.go` | Unit (`ro_test.go`, `tools_test.go`) + integration (`ro_integration_test.go`, needs `PG_TEST_DSN`). |
 | `DEPLOY-WINDOWS.md` | Full from-scratch Windows VPS deploy guide (Russian): prerequisites, network to the PG host, secrets/ACL, role bootstrap, ZCode registration, git/secrets rules, troubleshooting, checklist. Keep in sync with the README "Windows (VPS)" quick section when behavior changes. |
+| `mcp-websearch/` | Second module (`github.com/ilkoid/mcp-websearch`, own go.mod): quota-free local web search / page reader. Tools `web_search` (plain-HTTP DDG/Bing scrape, auto-fallback) + `read_url` (readable-text extraction, 48KB cap, charset-aware). Registered in BOTH ZCode (`~/.zcode/cli/config.json`) and AutoClaw (`~/.openclaw-autoclaw/openclaw.json`) so neither agent burns the hosted web-search/web-reader quota; steering rules live in `~/.zcode/AGENTS.md` and the auto-coder workspace AGENTS.md. `--selftest` probes the live engines; if DDG/Bing ever bot-wall this IP, the documented escalation is the interactive browser, not scraping tricks. |
 
 ## Architecture rules that matter for edits
 
