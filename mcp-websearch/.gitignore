@@ -1,0 +1,2 @@
+# Local build artifact of `go build ./...`; canonical install is ~/bin (see AGENTS.md).
+mcp-websearch
