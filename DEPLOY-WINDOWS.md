@@ -39,26 +39,29 @@ psql-обход). Возможности и ограничения — в раз
 
 ## 1. Сеть: как VPS видит PostgreSQL (проверить ПЕРВЫМ)
 
-Прод-инстанс живёт на `192.168.10.7:15432` — это **приватный адрес LAN**.
-С постороннего VPS он не маршрутизируется. Варианты, по убыванию простоты:
+Дефолт бинарника — `localhost:5432`: если PG работает на той же машине,
+env в config.json вообще не нужен. Удалённые инстансы — например, прод
+poncho-ai `10.120.24.155:5432` — это **приватные адреса**, с постороннего VPS
+они не маршрутизируются. Варианты, по убыванию простоты:
 
 1. **VPS в той же сети / есть тоннель** (WireGuard, Tailscale, SSH
-   port-forward) → оставить `PGHOST=192.168.10.7` (или IP тоннеля),
-   `PGSSLMODE=disable` допустим только внутри доверенного тоннеля.
+   port-forward) → в entry указать `PGHOST` = адрес из тоннеля (или приватный
+   IP, если сети пересекаются); `PGSSLMODE=disable` допустим только внутри
+   доверенного тоннеля.
 2. **Публичный доступ** → пробросить порт PG, в config.json поставить
    `"PGSSLMODE": "require"` (или `verify-full`), и на сервере PG:
    - добавить IP VPS в `pg_hba.conf`:
      `hostssl  all  mcp_ro  <ip_vps>/32  scram-sha-256`
    - применить: `SELECT pg_reload_conf();` (под админом)
    - открыть порт в firewall PG-хоста.
-3. **Свой PG прямо на VPS** → `PGHOST=127.0.0.1`, тогда обязательно раздел 5
-   (bootstrap роли с нуля, вариант В).
+3. **Свой PG прямо на VPS** → дефолт `localhost:5432` уже верен (env не
+   нужен), тогда обязательно раздел 5 (bootstrap роли с нуля, вариант В).
 
-Проверка достижимости с VPS (PowerShell — только для диагностики, сам wrapper
-всегда запускается под cmd.exe):
+Проверка достижимости с VPS до удалённого хоста (PowerShell — только для
+диагностики, сам wrapper всегда запускается под cmd.exe):
 
 ```powershell
-Test-NetConnection 192.168.10.7 -Port 15432
+Test-NetConnection 10.120.24.155 -Port 5432
 ```
 
 `TcpTestSucceeded : True` — можно продолжать. `False` — чинить сеть до всего
@@ -150,9 +153,9 @@ icacls "%USERPROFILE%\.config\mcp-pg-readonly\env.cmd" /inheritance:r /grant:r "
   ACL этому пользователю, иначе wrapper увидит «empty password».
 - `PG_RO_PWD` ≠ `PG_PWD` (админ-пароль загрузчиков poncho-ai) ≠
   `PG_ADMIN_PWD`. Не переиспользовать.
-- Если VPS подключается к **существующему** PG (192.168.10.7) — роль `mcp_ro`
-  там уже создана; используйте **тот же пароль**, что на Mac (взять из
-  `~/.config/mcp-pg-readonly/env`, передать по RDP/менеджеру секретов, не
+- Если целевой PG **уже настроен с ролью `mcp_ro`** (его бутстрапнули на
+  другой машине) — используйте **тот же пароль** (взять из
+  `~/.config/mcp-pg-readonly/env` там, передать по RDP/менеджеру секретов, не
   через git/чат/issue) — и раздел 5 пропустите. Для проду poncho-ai
   (`10.120.24.155`) свой расклад — роль `arm_ai_ro`, пароль из `PG_USER_PWD`:
   это вариант Б раздела 5, сюда добавляется `set PG_USER_PWD=...`.
@@ -161,9 +164,10 @@ icacls "%USERPROFILE%\.config\mcp-pg-readonly\env.cmd" /inheritance:r /grant:r "
 
 ## 5. Роль для чтения на PG — три варианта
 
-**Вариант А — существующий PG с общей ролью `mcp_ro` (192.168.10.7:15432).**
-Роль уже создана; используйте тот же пароль, что на Mac (раздел 4). Ничего
-делать не надо, остальной раздел пропустите.
+**Вариант А — PG, где роль `mcp_ro` уже создана** (кластер, который уже
+бутстрапнули: локальная машина разработчика и т.п.). Используйте тот же
+пароль (раздел 4); для удалённого хоста — просто `PGHOST`/`PGPORT` в entry.
+Ничего делать не надо, остальной раздел пропустите.
 
 **Вариант Б — существующий PG со своей read-only ролью.** Реальный кейс: прод
 poncho-ai — `10.120.24.155:5432`, база `wb_data_prod`, роль **`arm_ai_ro`**,
@@ -264,15 +268,15 @@ Write probe **обязан** упасть — это сквозная прове
         "type": "stdio",
         "command": "C:/Users/ВАШ_ЮЗЕР/bin/mcp-pg-readonly-run.cmd",
         "args": ["--database", "wb_data_prod"],
-        "timeoutMs": 200000,
-        "env": { "PGHOST": "192.168.10.7", "PGPORT": "15432" }
+        "timeoutMs": 200000
+        // env нужен только для удалённого PG (дефолт — localhost:5432);
+        // пример удалённого — pg-readonly-arm ниже
       },
       "pg-readonly-test": {
         "type": "stdio",
         "command": "C:/Users/ВАШ_ЮЗЕР/bin/mcp-pg-readonly-run.cmd",
         "args": ["--database", "wb_data_test"],
-        "timeoutMs": 200000,
-        "env": { "PGHOST": "192.168.10.7", "PGPORT": "15432" }
+        "timeoutMs": 200000
       }
     }
   }
@@ -355,7 +359,7 @@ Write probe **обязан** упасть — это сквозная прове
 call "%USERPROFILE%\.config\mcp-pg-readonly\env.cmd"
 set PGPASSWORD=%PG_RO_PWD%
 set PGOPTIONS=-c statement_timeout=10min
-"%ProgramFiles%\PostgreSQL\17\bin\psql.exe" -h 192.168.10.7 -p 15432 -U mcp_ro -d wb_data_prod ^
+"%ProgramFiles%\PostgreSQL\17\bin\psql.exe" -h localhost -p 5432 -U mcp_ro -d wb_data_prod ^
   -c "SELECT date_trunc('day', dt) AS day, count(*), sum(price) FROM sales GROUP BY 1"
 ```
 

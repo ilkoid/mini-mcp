@@ -31,12 +31,13 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// Connection defaults mirror poncho-ai's BuildPgDSN (local dev RYZEN-ILKOID).
-// Overridable via PGHOST / PGPORT / PGSSLMODE env vars. The database is
-// REQUIRED (no silent prod default in the binary — design §3.3).
+// Connection defaults are the idiomatic local ones — a PostgreSQL on the same
+// machine (localhost:5432) needs no env at all. Remote hosts override via
+// PGHOST / PGPORT / PGSSLMODE env vars (set per server entry in config.json).
+// The database is REQUIRED (no silent prod default in the binary — design §3.3).
 const (
-	defaultHost = "192.168.10.7"
-	defaultPort = "15432"
+	defaultHost = "localhost"
+	defaultPort = "5432"
 	defaultUser = "mcp_ro"
 	defaultPwdEnv = "PG_RO_PWD" // distinct from PG_PWD (admin/app downloaders)
 	defaultSSLMode = "disable"

@@ -30,7 +30,7 @@ func mustTime(s string) time.Time {
 // at prod (design §8.1).
 //
 // Example:
-//   PG_TEST_DSN="postgres://mcp_ro:SECRET@192.168.10.7:15432/wb_data_test?sslmode=disable" \
+//   PG_TEST_DSN="postgres://mcp_ro:SECRET@localhost:5432/wb_data_test?sslmode=disable" \
 //     go test -run TestReadOnly -v
 
 func testPool(t *testing.T) *pgxpool.Pool {

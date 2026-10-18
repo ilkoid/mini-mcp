@@ -99,7 +99,7 @@ func TestQueryDescriptionFmt_InterpolatesRole(t *testing.T) {
 		{"mcp_ro", "PG_RO_PWD"},
 		{"arm_ai_ro", "PG_USER_PWD"},
 	} {
-		desc := buildQueryDescription(tc.role, tc.pwdEnv, "wb_data_test", "192.168.10.7", "15432")
+		desc := buildQueryDescription(tc.role, tc.pwdEnv, "wb_data_test", "localhost", "5432")
 		if !strings.Contains(desc, "role "+tc.role+", READ ONLY") {
 			t.Fatalf("role %s: description does not name it", tc.role)
 		}
@@ -116,7 +116,7 @@ func TestQueryDescriptionFmt_InterpolatesRole(t *testing.T) {
 // from test. It must carry the database name and the configured host:port, and
 // must flag *_prod loudly (and only *_prod). No DB needed.
 func TestQueryDescription_NamesDatabaseHostAndProd(t *testing.T) {
-	const host, port = "192.168.10.7", "15432"
+	const host, port = "localhost", "5432"
 	addr := host + ":" + port
 	prod := buildQueryDescription("mcp_ro", "PG_RO_PWD", "wb_data_prod", host, port)
 	test := buildQueryDescription("mcp_ro", "PG_RO_PWD", "wb_data_test", host, port)

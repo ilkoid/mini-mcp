@@ -16,7 +16,7 @@
 -- Usage:
 --   set -a; source ~/.config/mcp-pg-readonly/env   # provides PG_RO_PWD
 --   set +a
---   PGPASSWORD="$PG_ADMIN_PWD" psql -h 192.168.10.7 -p 15432 -U postgres \
+--   PGPASSWORD="$PG_ADMIN_PWD" psql -h localhost -p 5432 -U postgres \
 --     -d wb_data_test -v pwd="$PG_RO_PWD" -f ~/dev/mini-mcp/role-bootstrap.sql
 --   # prod — only after smoke on test, same Phase A:
 --   # PGPASSWORD="$PG_ADMIN_PWD" psql ... -d wb_data_prod -v pwd="$PG_RO_PWD" -f ~/dev/mini-mcp/role-bootstrap.sql
