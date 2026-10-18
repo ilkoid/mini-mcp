@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"strings"
 	"testing"
 
@@ -100,12 +99,73 @@ func TestQueryDescriptionFmt_InterpolatesRole(t *testing.T) {
 		{"mcp_ro", "PG_RO_PWD"},
 		{"arm_ai_ro", "PG_USER_PWD"},
 	} {
-		desc := fmt.Sprintf(queryDescriptionFmt, tc.role, tc.role, tc.pwdEnv)
+		desc := buildQueryDescription(tc.role, tc.pwdEnv, "wb_data_test", "192.168.10.7", "15432")
 		if !strings.Contains(desc, "role "+tc.role+", READ ONLY") {
 			t.Fatalf("role %s: description does not name it", tc.role)
 		}
 		if !strings.Contains(desc, "PGPASSWORD=$"+tc.pwdEnv) {
 			t.Fatalf("role %s: description does not name password env %s", tc.role, tc.pwdEnv)
+		}
+	}
+}
+
+// TestQueryDescription_NamesDatabaseHostAndProd is the anti-"which DB am I on?"
+// guard. Two entries — `pg-readonly` (wb_data_prod) and `pg-readonly-test`
+// (wb_data_test) — run this same binary against the same host:port and differ
+// ONLY by --database, so the description is the agent's only way to tell prod
+// from test. It must carry the database name and the configured host:port, and
+// must flag *_prod loudly (and only *_prod). No DB needed.
+func TestQueryDescription_NamesDatabaseHostAndProd(t *testing.T) {
+	const host, port = "192.168.10.7", "15432"
+	addr := host + ":" + port
+	prod := buildQueryDescription("mcp_ro", "PG_RO_PWD", "wb_data_prod", host, port)
+	test := buildQueryDescription("mcp_ro", "PG_RO_PWD", "wb_data_test", host, port)
+
+	// Printed on failure (and under -v) so the actual text is inspectable.
+	t.Logf("wb_data_prod description:\n%s", prod)
+	t.Logf("wb_data_test description:\n%s", test)
+
+	for _, want := range []string{"wb_data_prod", addr, "PRODUCTION"} {
+		if !strings.Contains(prod, want) {
+			t.Errorf("prod description missing %q:\n%s", want, prod)
+		}
+	}
+	for _, want := range []string{"wb_data_test", addr} {
+		if !strings.Contains(test, want) {
+			t.Errorf("test description missing %q:\n%s", want, test)
+		}
+	}
+	// The prod flag must be the first thing the agent reads, and it must be
+	// per-database — a *_test entry sharing the host must NOT inherit it.
+	if !strings.HasPrefix(prod, prodMarker) {
+		t.Errorf("prod description does not lead with %q:\n%s", prodMarker, prod)
+	}
+	if strings.Contains(test, "PRODUCTION") {
+		t.Errorf("non-prod database flagged as PRODUCTION:\n%s", test)
+	}
+	if strings.Contains(prod, "wb_data_test") {
+		t.Errorf("prod description mentions the test database:\n%s", prod)
+	}
+	// host:port and database are interpolated, not baked into the format.
+	if strings.Contains(queryDescriptionFmt, host) || strings.Contains(queryDescriptionFmt, "wb_data") {
+		t.Error("queryDescriptionFmt hardcodes host/database — keep the placeholders")
+	}
+}
+
+// TestIsProdDatabase pins the *_prod predicate (case-insensitive).
+func TestIsProdDatabase(t *testing.T) {
+	for db, want := range map[string]bool{
+		"wb_data_prod":      true,
+		"ozon_data_prod":    true,
+		"WB_DATA_PROD":      true,
+		"wb_data_test":      false,
+		"wb_data_prod_test": false,
+		"production":        false,
+		"prod":              false,
+		"":                  false,
+	} {
+		if got := isProdDatabase(db); got != want {
+			t.Errorf("isProdDatabase(%q) = %v, want %v", db, got, want)
 		}
 	}
 }

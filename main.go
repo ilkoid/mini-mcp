@@ -105,7 +105,12 @@ func main() {
 		Title:   "PostgreSQL read-only",
 		Version: "0.1.0",
 	}, nil)
-	registerTools(server, pool, *user, *pwdEnvName)
+	// The tool description must name the CONFIGURED address (PGHOST/PGPORT) so
+	// the agent can see which database+host its tools hit — prod and test
+	// entries run this same binary on the same host:port and differ only by
+	// --database.
+	host, port := envOr("PGHOST", defaultHost), envOr("PGPORT", defaultPort)
+	registerTools(server, pool, *user, *pwdEnvName, *database, host, port)
 
 	ctx := context.Background()
 	if err := server.Run(ctx, &mcp.StdioTransport{}); err != nil {

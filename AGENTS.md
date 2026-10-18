@@ -130,7 +130,11 @@ An entry may run as a different **existing** read-only role instead of
 `tools.go` interpolates the role + env-var name into the `pg_readonly_query`
 description (`queryDescriptionFmt`) — keep them parameterized when editing
 that text; a hardcoded `mcp_ro` misdirects the agent's psql bypass on other
-roles. The psql bypass is only as safe as the role's grants, so an
+roles. `buildQueryDescription` also names the `--database` and the configured
+`PGHOST:PGPORT` (not `inet_server_addr()`), and leads with `⚠ PRODUCTION
+database` when the database matches `*_prod`: `pg-readonly` (prod) and
+`pg-readonly-test` run the same binary on the same host:port and differ only
+by database name, so that text is the agent's only prod/test signal. The psql bypass is only as safe as the role's grants, so an
 existing-role entry presumes the role was verified SELECT-only
 (`role_table_grants` check, see README / DEPLOY-WINDOWS.md variant Б).
 
