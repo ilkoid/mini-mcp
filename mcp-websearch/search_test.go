@@ -76,9 +76,9 @@ func TestParseDDG_MaxResults(t *testing.T) {
 func TestUnwrapDDG(t *testing.T) {
 	cases := map[string]string{
 		"//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fa&rut=1": "https://example.com/a",
-		"https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fb":  "https://example.com/b",
+		"https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fb": "https://example.com/b",
 		"/l/?uddg=https%3A%2F%2Fexample.com%2Fc":                       "https://example.com/c",
-		"https://example.com/direct":                                    "https://example.com/direct",
+		"https://example.com/direct":                                   "https://example.com/direct",
 	}
 	for in, want := range cases {
 		if got := unwrapDDG(in); got != want {
