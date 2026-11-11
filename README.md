@@ -103,7 +103,7 @@ downloaders use). Don't reuse them.
 
 ```bash
 set -a; source ~/.config/mcp-pg-readonly/env; set +a   # PG_RO_PWD, PG_ADMIN_PWD
-PGPASSWORD="$PG_ADMIN_PWD" psql -h 192.168.10.7 -p 15432 -U postgres \
+PGPASSWORD="$PG_ADMIN_PWD" psql -h localhost -p 5432 -U postgres \
   -d wb_data_test -v pwd="$PG_RO_PWD" -f role-bootstrap.sql
 # prod — only after smoke on test:
 # PGPASSWORD="$PG_ADMIN_PWD" psql ... -d wb_data_prod -v pwd="$PG_RO_PWD" -f role-bootstrap.sql
@@ -180,7 +180,7 @@ the `pg_readonly_query` tool description so the agent can find it on its own.
 # macOS / Linux — heavy SELECT bypassing MCP caps (still SELECT-only via mcp_ro)
 set -a; source ~/.config/mcp-pg-readonly/env; set +a
 PGPASSWORD="$PG_RO_PWD" PGOPTIONS='-c statement_timeout=10min' \
-  psql -h 192.168.10.7 -p 15432 -U mcp_ro -d wb_data_prod \
+  psql -h localhost -p 5432 -U mcp_ro -d wb_data_prod \
   -c "SELECT date_trunc('day', dt) AS day, count(*), sum(price) FROM sales GROUP BY 1"
 ```
 
@@ -204,15 +204,14 @@ that's the provider config). Add two server entries for prod/test isolation:
         "type": "stdio",
         "command": "/Users/ilkoid/bin/mcp-pg-readonly-run",
         "args": ["--database", "wb_data_prod", "--statement-timeout", "10m", "--query-timeout", "12m"],
-        "timeoutMs": 800000,
-        "env": { "PGHOST": "192.168.10.7", "PGPORT": "15432" }
+        "timeoutMs": 800000
+        // no env: defaults are localhost:5432 — set PGHOST/PGPORT for a remote PG
       },
       "pg-readonly-test": {
         "type": "stdio",
         "command": "/Users/ilkoid/bin/mcp-pg-readonly-run",
         "args": ["--database", "wb_data_test", "--statement-timeout", "4m", "--query-timeout", "6m"],
-        "timeoutMs": 400000,
-        "env": { "PGHOST": "192.168.10.7", "PGPORT": "15432" }
+        "timeoutMs": 400000
       }
     }
   }
@@ -257,7 +256,8 @@ server — each entry differs only by `PGHOST` / `PGPORT` / `PGSSLMODE` /
         "command": "/Users/ilkoid/bin/mcp-pg-readonly-run",
         "args": ["--database", "wb_data_prod", "--statement-timeout", "10m", "--query-timeout", "12m"],
         "timeoutMs": 800000,
-        "env": { "PGHOST": "192.168.10.7", "PGPORT": "15432" }
+        // remote PG needs env; a local PG (localhost:5432) needs none
+        "env": { "PGHOST": "10.120.24.155", "PGPORT": "5432" }
       },
       "pg-vps2": {
         "type": "stdio",
@@ -437,8 +437,9 @@ icacls.exe "$dir\anonymize.yaml" /inheritance:r /grant:r "$($env:USERNAME):(R,W)
 
 ### 4. Bootstrap the role — only if the VPS has its OWN database
 
-**Skip this step if the VPS connects to the same PostgreSQL the Mac uses
-(`192.168.10.7:15432`)** — `mcp_ro` is already created there. Only run
+**Skip this step if the VPS connects to a PostgreSQL that already has the
+`mcp_ro` role** (the role and grants live in the PG cluster — any machine
+that was bootstrapped before has them). Only run
 `role-bootstrap.sql` if the VPS has a separate PG instance:
 
 ```cmd
@@ -466,7 +467,8 @@ keep `command` as a **string** (not an array):
         "command": "C:/Users/YOUR_USER/bin/mcp-pg-readonly-run.cmd",
         "args": ["--database", "wb_data_prod", "--statement-timeout", "10m", "--query-timeout", "12m"],
         "timeoutMs": 800000,
-        "env": { "PGHOST": "192.168.10.7", "PGPORT": "15432" }
+        // remote PG needs env; a local PG (localhost:5432) needs none — that's the default
+        "env": { "PGHOST": "10.120.24.155", "PGPORT": "5432" }
       }
     }
   }

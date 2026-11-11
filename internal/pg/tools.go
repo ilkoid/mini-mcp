@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -46,13 +47,49 @@ type describeTableInput struct {
 	Table  string `json:"table" jsonschema:"table name to describe"`
 }
 
-// queryDescriptionFmt is the pg_readonly_query description. The role and the
-// password-env name are interpolated from --user / --password-env so the
-// psql-bypass hint always matches the role this entry actually runs as
-// (mcp_ro locally, e.g. arm_ai_ro on the poncho-ai prod instance). Never
-// hardcode a role/env name here — a wrong hint sends the agent after
-// credentials that don't exist on that host.
-const queryDescriptionFmt = "Read-only SQL against PostgreSQL (role %s, READ ONLY transaction). Returns JSON {columns, row_count, truncated, notice, rows}. Caps: 4000 rows / 48KB; for full result sets paginate with LIMIT/OFFSET and repeat. int8/numeric values (count(*), sum/avg/round results) arrive as JSON STRINGS to preserve precision — cast ::int or ::float8 in SQL when you need a JSON number (never cast IDs like nm_id to float). Prefer aggregates (GROUP BY / windows) over raw dumps of large fact tables (e.g. sales). Use $1,$2 placeholders for values. Output is ANONYMIZED: sensitive keywords are replaced with aliases by the server (this is not configurable from your side); when filtering (WHERE/JOIN), use the ALIAS values you saw in previous results — they are translated back transparently; for text equality on anonymized values prefer ILIKE over '=' (the restored keyword spelling may differ in case from the stored value, and PostgreSQL '=' is case-sensitive and would silently return 0 rows). String-extraction, hash and length functions (left/right/substring/split_part/md5/sha*/encode/length/strpos/…) are BLOCKED by the anonymization guard — they can leak derivatives of sensitive values; select the column itself or use aggregates instead. Partial LIKE/ILIKE patterns (like '%%frag%%') are NOT translated and may behave unexpectedly — prefer full-value filters (a pattern containing the whole alias works). The same visible alias may legitimately appear as two GROUP BY rows (two data eras of stored values), and full-literal equality/pattern filters on an alias are auto-expanded to all stored spellings when configured. For heavier read-only analytics (beyond these caps or near the timeout), run psql directly with the SAME read-only role (%s, PGPASSWORD=$%s — NEVER the admin password) and set your own statement_timeout there; the role is SELECT-only, so this stays safe."
+// prodDatabaseSuffix is what marks a database name as production
+// (*_prod, case-insensitive).
+const prodDatabaseSuffix = "_prod"
+
+// isProdDatabase reports whether a database name looks like production. Two
+// MCP entries on this host run the SAME binary against the SAME host:port and
+// differ ONLY by database name (`pg-anon` → wb_data_prod,
+// `pg-anon-test` → wb_data_test), so the name is the only signal the agent
+// has. Anything that is not *_prod (e.g. *_test) is treated as non-prod.
+func isProdDatabase(database string) bool {
+	return strings.HasSuffix(toLowerASCII(database), prodDatabaseSuffix)
+}
+
+// queryDescriptionFmt is the pg_readonly_query description. Substitutions, in
+// order: the production-warning prefix ("" or the PRODUCTION marker), the
+// database name, host, port, role, role, password-env name. Render it via
+// buildQueryDescription rather than calling fmt.Sprintf by hand — the arg list
+// is positional.
+//
+// The role and the password-env name are interpolated from --user /
+// --password-env so the psql-bypass hint always matches the role this entry
+// actually runs as (mcp_ro locally, e.g. arm_ai_ro on the ARM_AI prod
+// instance). Never hardcode a role/env name here — a wrong hint sends the
+// agent after credentials that don't exist on that host.
+const queryDescriptionFmt = "%sRead-only SQL against PostgreSQL database %s on %s:%s (role %s, READ ONLY transaction). Returns JSON {columns, row_count, truncated, notice, rows}. Caps: 4000 rows / 48KB; for full result sets paginate with LIMIT/OFFSET and repeat. int8/numeric values (count(*), sum/avg/round results) arrive as JSON STRINGS to preserve precision — cast ::int or ::float8 in SQL when you need a JSON number (never cast IDs like nm_id to float). Prefer aggregates (GROUP BY / windows) over raw dumps of large fact tables (e.g. sales). Use $1,$2 placeholders for values. Output is ANONYMIZED: sensitive keywords are replaced with aliases by the server (this is not configurable from your side); when filtering (WHERE/JOIN), use the ALIAS values you saw in previous results — they are translated back transparently; for text equality on anonymized values prefer ILIKE over '=' (the restored keyword spelling may differ in case from the stored value, and PostgreSQL '=' is case-sensitive and would silently return 0 rows). String-extraction, hash and length functions (left/right/substring/split_part/md5/sha*/encode/length/strpos/…) are BLOCKED by the anonymization guard — they can leak derivatives of sensitive values; select the column itself or use aggregates instead. Partial LIKE/ILIKE patterns (like '%%frag%%') are NOT translated and may behave unexpectedly — prefer full-value filters (a pattern containing the whole alias works). The same visible alias may legitimately appear as two GROUP BY rows (two data eras of stored values), and full-literal equality/pattern filters on an alias are auto-expanded to all stored spellings when configured. For heavier read-only analytics (beyond these caps or near the timeout), run psql directly with the SAME read-only role (%s, PGPASSWORD=$%s — NEVER the admin password) and set your own statement_timeout there; the role is SELECT-only, so this stays safe."
+
+// prodMarker leads the description of a production database. It is deliberately
+// the first thing in the text: the agent must be able to tell prod from test at
+// a glance, before it reads anything else.
+const prodMarker = "⚠ PRODUCTION database — "
+
+// buildQueryDescription renders queryDescriptionFmt for one server entry.
+// database comes from --database (or PGDATABASE), host/port from PGHOST/PGPORT
+// — the CONFIGURED address, deliberately not inet_server_addr(), which behind
+// the docker/NAT boundary reports the container's internal IP (172.17.0.2) and
+// is useless to an agent that wants to run psql itself.
+func buildQueryDescription(role, pwdEnv, database, host, port string) string {
+	prod := ""
+	if isProdDatabase(database) {
+		prod = prodMarker
+	}
+	return fmt.Sprintf(queryDescriptionFmt, prod, database, host, port, role, role, pwdEnv)
+}
 
 // toolErr builds the standard error result. Error text is masked: DB error
 // messages happily echo values (duplicate-key details, conversion errors) and
@@ -63,13 +100,14 @@ func toolErr(err error) (*mcp.CallToolResult, any, error) {
 	return &r, nil, nil
 }
 
-// RegisterTools wires the three read-only tools onto the server. role/pwdEnv
-// feed the description (see queryDescriptionFmt).
-func RegisterTools(s *mcp.Server, pool *pgxpool.Pool, role, pwdEnv string) {
+// RegisterTools wires the three read-only tools onto the server.
+// role/pwdEnv/database/host/port feed the pg_readonly_query description (see
+// buildQueryDescription) so the agent sees WHICH database its tools hit.
+func RegisterTools(s *mcp.Server, pool *pgxpool.Pool, role, pwdEnv, database, host, port string) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "pg_readonly_query",
 		Title:       "Read-only SQL query",
-		Description: fmt.Sprintf(queryDescriptionFmt, role, role, pwdEnv),
+		Description: buildQueryDescription(role, pwdEnv, database, host, port),
 		Annotations: readOnlyAnnotations,
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in queryInput) (*mcp.CallToolResult, any, error) {
 		args := make([]any, len(in.Args))

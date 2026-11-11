@@ -41,12 +41,13 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// Connection defaults mirror poncho-ai's BuildPgDSN (local dev RYZEN-ILKOID).
-// Overridable via PGHOST / PGPORT / PGSSLMODE env vars. The database is
-// REQUIRED (no silent prod default in the binary — design §3.3).
+// Connection defaults are the idiomatic local ones — a PostgreSQL on the same
+// machine (localhost:5432) needs no env at all. Remote hosts override via
+// PGHOST / PGPORT / PGSSLMODE env vars (set per server entry in config.json).
+// The database is REQUIRED (no silent prod default in the binary — design §3.3).
 const (
-	defaultHost    = "192.168.10.7"
-	defaultPort    = "15432"
+	defaultHost    = "localhost"
+	defaultPort    = "5432"
 	defaultUser    = "mcp_ro"
 	defaultPwdEnv  = "PG_RO_PWD" // distinct from PG_PWD (admin/app downloaders)
 	defaultSSLMode = "disable"
@@ -140,7 +141,12 @@ func main() {
 		Title:   "PostgreSQL read-only (anonymized)",
 		Version: serverVersion,
 	}, nil)
-	pg.RegisterTools(server, pool, *user, *pwdEnvName)
+	// The tool description must name the CONFIGURED address (PGHOST/PGPORT) so
+	// the agent can see which database+host its tools hit — prod and test
+	// entries run this same binary on the same host:port and differ only by
+	// --database.
+	host, port := envOr("PGHOST", defaultHost), envOr("PGPORT", defaultPort)
+	pg.RegisterTools(server, pool, *user, *pwdEnvName, *database, host, port)
 
 	ctx := context.Background()
 	if err := server.Run(ctx, &mcp.StdioTransport{}); err != nil {

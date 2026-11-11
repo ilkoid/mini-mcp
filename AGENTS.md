@@ -27,6 +27,9 @@ language on screen). Code, identifiers, file comments, commit messages, and
 log lines stay English as normal engineering hygiene; the boundary is
 "what the user reads in the chat".
 
+The repo also hosts the sibling module **`mcp-websearch/`** — a quota-free
+local web search / page reader MCP (see the last table row).
+
 ## Build, test, run
 
 ```bash
@@ -80,6 +83,7 @@ MSSQL_TEST_DSN="sqlserver://ai_reader:...@host:1433?database=db" \
 | `.gitattributes` | CRLF hygiene: `*.cmd`/`*.bat` forced to CRLF (cmd breaks on LF), everything else LF, `*.exe` binary. |
 | `*_test.go` | Unit (`ro_test.go`, `tools_test.go`, `guards_test.go`, `guards_pg_test.go`, mssql `precheck_test.go`/`encode_test.go`) + integration (`ro_integration_test.go` ← `PG_TEST_DSN`; mssql `ro_integration_test.go` ← `MSSQL_TEST_DSN`). |
 | `DEPLOY-WINDOWS.md` | Full from-scratch Windows VPS deploy guide (Russian): prerequisites, network to the PG host, secrets/ACL, role bootstrap, ZCode registration, git/secrets rules, troubleshooting, checklist. Keep in sync with the README "Windows (VPS)" quick section when behavior changes. |
+| `mcp-websearch/` | Second module (`github.com/ilkoid/mcp-websearch`, own go.mod): quota-free local web search / page reader. Tools `web_search` (plain-HTTP DDG/Bing scrape, auto-fallback) + `read_url` (readable-text extraction, 48KB cap, charset-aware). Registered in BOTH ZCode (`~/.zcode/cli/config.json`) and AutoClaw (`~/.openclaw-autoclaw/openclaw.json`) so neither agent burns the hosted web-search/web-reader quota; steering rules live in `~/.zcode/AGENTS.md` and the auto-coder workspace AGENTS.md. `--selftest` probes the live engines; if DDG/Bing ever bot-wall this IP, the documented escalation is the interactive browser, not scraping tricks. |
 
 ## Architecture rules that matter for edits
 
@@ -267,7 +271,11 @@ An entry may run as a different **existing** read-only role instead of
 `tools.go` interpolates the role + env-var name into the `pg_readonly_query`
 description (`queryDescriptionFmt`) — keep them parameterized when editing
 that text; a hardcoded `mcp_ro` misdirects the agent's psql bypass on other
-roles. The psql bypass is only as safe as the role's grants, so an
+roles. `buildQueryDescription` also names the `--database` and the configured
+`PGHOST:PGPORT` (not `inet_server_addr()`), and leads with `⚠ PRODUCTION
+database` when the database matches `*_prod`: `pg-readonly` (prod) and
+`pg-readonly-test` run the same binary on the same host:port and differ only
+by database name, so that text is the agent's only prod/test signal. The psql bypass is only as safe as the role's grants, so an
 existing-role entry presumes the role was verified SELECT-only
 (`role_table_grants` check, see README / DEPLOY-WINDOWS.md variant Б).
 
