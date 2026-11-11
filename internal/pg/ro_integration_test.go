@@ -1,4 +1,4 @@
-package main
+package pg
 
 import (
 	"context"
@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"mini-mcp/internal/anon"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -39,7 +41,7 @@ func testPool(t *testing.T) *pgxpool.Pool {
 	if dsn == "" {
 		t.Skip("PG_TEST_DSN not set; skipping integration test")
 	}
-	pool, err := newPool(dsn)
+	pool, err := NewPool(dsn)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -49,7 +51,7 @@ func testPool(t *testing.T) *pgxpool.Pool {
 
 func TestReadOnly_AllowsSelect(t *testing.T) {
 	pool := testPool(t)
-	res, err := runReadOnly(context.Background(), pool, "SELECT 1 AS ok", nil)
+	res, err := RunReadOnly(context.Background(), pool, "SELECT 1 AS ok", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +63,7 @@ func TestReadOnly_AllowsSelect(t *testing.T) {
 func TestReadOnly_RejectsWrite(t *testing.T) {
 	pool := testPool(t)
 	// Either the precheck (DX) or the role/txn must reject this.
-	_, err := runReadOnly(context.Background(), pool, "CREATE TEMP TABLE _t (id int)", nil)
+	_, err := RunReadOnly(context.Background(), pool, "CREATE TEMP TABLE _t (id int)", nil)
 	if err == nil {
 		t.Fatal("write unexpectedly succeeded — read-only boundary broken")
 	}
@@ -69,7 +71,7 @@ func TestReadOnly_RejectsWrite(t *testing.T) {
 
 func TestReadOnly_RowCap(t *testing.T) {
 	pool := testPool(t)
-	res, err := runReadOnly(context.Background(), pool, "SELECT i FROM generate_series(1, 600) AS t(i)", nil)
+	res, err := RunReadOnly(context.Background(), pool, "SELECT i FROM generate_series(1, 600) AS t(i)", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +86,7 @@ func TestReadOnly_RowCap(t *testing.T) {
 func TestReadOnly_Int8JSONAsString(t *testing.T) {
 	pool := testPool(t)
 	// 2^53+1 must come back as a JSON string.
-	res, err := runReadOnly(context.Background(), pool, "SELECT 9007199254740993::bigint AS nm", nil)
+	res, err := RunReadOnly(context.Background(), pool, "SELECT 9007199254740993::bigint AS nm", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,10 +106,10 @@ func TestReadOnly_StatementTimeout(t *testing.T) {
 	pool := testPool(t)
 	// Shrink statement_timeout for the test instead of waiting 2 minutes for
 	// the flag default to fire; pg_sleep(2) then exceeds it.
-	old := statementTimeout
-	statementTimeout = 500 * time.Millisecond
-	defer func() { statementTimeout = old }()
-	_, err := runReadOnly(context.Background(), pool, "SELECT pg_sleep(2)", nil)
+	old := StatementTimeout
+	StatementTimeout = 500 * time.Millisecond
+	defer func() { StatementTimeout = old }()
+	_, err := RunReadOnly(context.Background(), pool, "SELECT pg_sleep(2)", nil)
 	if err == nil {
 		t.Fatal("expected statement_timeout error, got nil")
 	}
@@ -115,7 +117,7 @@ func TestReadOnly_StatementTimeout(t *testing.T) {
 
 func TestReadOnly_BindsParams(t *testing.T) {
 	pool := testPool(t)
-	res, err := runReadOnly(context.Background(), pool, "SELECT $1::int AS a, $2::text AS b",
+	res, err := RunReadOnly(context.Background(), pool, "SELECT $1::int AS a, $2::text AS b",
 		[]any{42, "hi"})
 	if err != nil {
 		t.Fatal(err)
@@ -129,7 +131,7 @@ func TestReadOnly_NumericAsString(t *testing.T) {
 	pool := testPool(t)
 	// Computed numerics (round(), typed literals) arrive as exact decimal
 	// strings — they used to fail the whole query with "unexpected type".
-	res, err := runReadOnly(context.Background(), pool,
+	res, err := RunReadOnly(context.Background(), pool,
 		"SELECT round(1.23456::numeric, 2) AS r, 1.5::numeric(10,2) AS n", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -144,7 +146,7 @@ func TestReadOnly_NumericAsString(t *testing.T) {
 
 func TestReadOnly_SemicolonInLiteral(t *testing.T) {
 	pool := testPool(t)
-	res, err := runReadOnly(context.Background(), pool, "SELECT 'a;b' AS s", nil)
+	res, err := RunReadOnly(context.Background(), pool, "SELECT 'a;b' AS s", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +165,7 @@ func TestReadOnly_SemicolonInLiteral(t *testing.T) {
 
 func TestReadOnly_ByteCapSingleBigRow(t *testing.T) {
 	pool := testPool(t)
-	res, err := runReadOnly(context.Background(), pool, "SELECT repeat('x', 100000) AS big", nil)
+	res, err := RunReadOnly(context.Background(), pool, "SELECT repeat('x', 100000) AS big", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,8 +179,8 @@ func TestReadOnly_ByteCapSingleBigRow(t *testing.T) {
 
 func TestReadOnly_ByteCapManyRows(t *testing.T) {
 	pool := testPool(t)
-	res, err := runReadOnly(context.Background(), pool,
-		"SELECT rpad('a', 150) AS pad FROM generate_series(1, 600)", nil)
+	res, err := RunReadOnly(context.Background(), pool,
+		"SELECT repeat('a', 150) AS pad FROM generate_series(1, 600)", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,8 +194,53 @@ func TestReadOnly_ByteCapManyRows(t *testing.T) {
 
 func TestReadOnly_DescribeNotFound(t *testing.T) {
 	pool := testPool(t)
-	_, err := describeTable(context.Background(), pool, "public", "no_such_table_xyz")
+	_, err := DescribeTable(context.Background(), pool, "public", "no_such_table_xyz")
 	if err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("want not-found error, got %v", err)
+	}
+}
+
+// TestReadOnly_AnonymizeRoundtrip exercises the full masking loop against a
+// live DB (PG_TEST_DSN only, SELECT-only): output masking, and the reverse
+// mapping that lets the agent filter by the alias it was shown. Synthetic
+// markers — never real keywords.
+func TestReadOnly_AnonymizeRoundtrip(t *testing.T) {
+	pool := testPool(t)
+	a, err := anon.New([]anon.Rule{{ReadSubstring: "__secret_word__", WriteSubstring: "__alias__"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := Anonymizer
+	Anonymizer = a
+	t.Cleanup(func() { Anonymizer = old })
+
+	// Output masking: the real value must never appear in the result.
+	res, err := RunReadOnly(context.Background(), pool, "SELECT '__secret_word__' AS s", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Rows[0][0] != "__alias__" {
+		t.Fatalf("output not masked: %v", res.Rows[0][0])
+	}
+
+	// Reverse mapping: the agent's alias is translated back, executes, and
+	// the result is masked again — Apply(Unmap) is identity on aliases.
+	res2, err := RunReadOnly(context.Background(), pool,
+		"SELECT $1::text AS s", []any{"__alias__"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res2.Rows[0][0] != "__alias__" {
+		t.Fatalf("roundtrip not identity on alias: %v", res2.Rows[0][0])
+	}
+
+	// Filtering by alias finds rows holding the real value.
+	res3, err := RunReadOnly(context.Background(), pool,
+		"SELECT count(*)::text AS n FROM (SELECT '__secret_word__' AS v) t WHERE v = $1", []any{"__alias__"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res3.Rows[0][0] != "1" {
+		t.Fatalf("WHERE by alias did not match: %v", res3.Rows[0][0])
 	}
 }

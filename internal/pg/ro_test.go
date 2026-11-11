@@ -1,4 +1,4 @@
-package main
+package pg
 
 import (
 	"context"
@@ -8,13 +8,15 @@ import (
 	"strings"
 	"testing"
 
+	"mini-mcp/internal/result"
+
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
 func TestRejectUnsafeSQL_Empty(t *testing.T) {
 	for _, in := range []string{"", "   ", "\n\t"} {
-		if err := rejectUnsafeSQL(in); err == nil {
+		if err := RejectUnsafeSQL(in); err == nil {
 			t.Fatalf("expected error for %q", in)
 		}
 	}
@@ -27,7 +29,7 @@ func TestRejectUnsafeSQL_MultiStatement(t *testing.T) {
 		"SELECT 1; -- comment\nSELECT 2;",
 	}
 	for _, in := range cases {
-		if err := rejectUnsafeSQL(in); err == nil {
+		if err := RejectUnsafeSQL(in); err == nil {
 			t.Fatalf("expected multi-statement rejection for %q", in)
 		}
 	}
@@ -35,7 +37,7 @@ func TestRejectUnsafeSQL_MultiStatement(t *testing.T) {
 
 func TestRejectUnsafeSQL_TrailingSemicolonOK(t *testing.T) {
 	for _, in := range []string{"SELECT 1", "SELECT 1;", "  SELECT 1 ;  ", "SELECT $1"} {
-		if err := rejectUnsafeSQL(in); err != nil {
+		if err := RejectUnsafeSQL(in); err != nil {
 			t.Fatalf("expected OK for %q, got %v", in, err)
 		}
 	}
@@ -59,7 +61,7 @@ func TestRejectUnsafeSQL_NonReadKeywords(t *testing.T) {
 		"MERGE INTO t USING s ON true WHEN MATCHED THEN UPDATE SET x=1",
 	}
 	for _, in := range cases {
-		if err := rejectUnsafeSQL(in); err == nil {
+		if err := RejectUnsafeSQL(in); err == nil {
 			t.Fatalf("expected rejection for %q", in)
 		}
 	}
@@ -76,7 +78,7 @@ func TestRejectUnsafeSQL_ReadStatementsOK(t *testing.T) {
 		"select 1",   // lowercase ok
 	}
 	for _, in := range cases {
-		if err := rejectUnsafeSQL(in); err != nil {
+		if err := RejectUnsafeSQL(in); err != nil {
 			t.Fatalf("expected OK for %q, got %v", in, err)
 		}
 	}
@@ -92,11 +94,11 @@ func TestRejectUnsafeSQL_SemicolonInLiteralsAndComments(t *testing.T) {
 		`SELECT E'a\';b' AS s`,
 		"SELECT 1 -- ; not a separator\n+ 2",
 		`/* ; */ SELECT 1`,
-		`SELECT string_to_array('a;b', ';')`,
+		`SELECT concat('a;b', ';')`, // concat is allowed (only cut/hash/length families are blocked)
 		`SELECT 'semi;colon';`,
 	}
 	for _, in := range cases {
-		if err := rejectUnsafeSQL(in); err != nil {
+		if err := RejectUnsafeSQL(in); err != nil {
 			t.Fatalf("expected OK for %q, got %v", in, err)
 		}
 	}
@@ -109,7 +111,7 @@ func TestRejectUnsafeSQL_RealSeparatorsStillRejected(t *testing.T) {
 		`SELECT $$x$$; SELECT 2`,
 	}
 	for _, in := range cases {
-		if err := rejectUnsafeSQL(in); err == nil {
+		if err := RejectUnsafeSQL(in); err == nil {
 			t.Fatalf("expected rejection for %q", in)
 		}
 	}
@@ -121,11 +123,11 @@ func TestRejectUnsafeSQL_CommentLeadingKeyword(t *testing.T) {
 		"-- note\nDROP TABLE t",
 		"/* hi */ DELETE FROM t",
 	} {
-		if err := rejectUnsafeSQL(in); err == nil {
+		if err := RejectUnsafeSQL(in); err == nil {
 			t.Fatalf("expected rejection for %q", in)
 		}
 	}
-	if err := rejectUnsafeSQL("/* hi */ SELECT 1"); err != nil {
+	if err := RejectUnsafeSQL("/* hi */ SELECT 1"); err != nil {
 		t.Fatalf("expected OK, got %v", err)
 	}
 }
@@ -145,13 +147,13 @@ func TestRejectUnsafeSQL_SessionStatementsRejected(t *testing.T) {
 		"BEGIN",
 		"COMMIT",
 	} {
-		if err := rejectUnsafeSQL(in); err == nil {
+		if err := RejectUnsafeSQL(in); err == nil {
 			t.Fatalf("expected rejection for %q", in)
 		}
 	}
 	// Read-only session introspection stays allowed.
 	for _, in := range []string{"SHOW statement_timeout", "EXPLAIN SELECT 1"} {
-		if err := rejectUnsafeSQL(in); err != nil {
+		if err := RejectUnsafeSQL(in); err != nil {
 			t.Fatalf("expected OK for %q, got %v", in, err)
 		}
 	}
@@ -184,12 +186,12 @@ func TestMaskLiteralsAndComments(t *testing.T) {
 
 func TestLeadingKeyword(t *testing.T) {
 	cases := map[string]string{
-		"SELECT 1":                "SELECT",
-		"  select 1":              "SELECT",
-		"(SELECT 1)":              "SELECT",
-		"WITH x AS (SELECT 1)":    "WITH",
-		"insert into t":           "INSERT",
-		"  \t UPDATE t":           "UPDATE",
+		"SELECT 1":             "SELECT",
+		"  select 1":           "SELECT",
+		"(SELECT 1)":           "SELECT",
+		"WITH x AS (SELECT 1)": "WITH",
+		"insert into t":        "INSERT",
+		"  \t UPDATE t":        "UPDATE",
 	}
 	for in, want := range cases {
 		if got := leadingKeyword(in); got != want {
@@ -206,13 +208,13 @@ func TestWrapQueryError(t *testing.T) {
 	if !errors.Is(err, stmtTO) {
 		t.Fatal("57014 must remain wrap-compatible with the original PgError")
 	}
-	if want := fmt.Sprintf("query exceeded statement_timeout (%s)", statementTimeout); !strings.Contains(msg, want) {
+	if want := fmt.Sprintf("query exceeded statement_timeout (%s)", StatementTimeout); !strings.Contains(msg, want) {
 		t.Fatalf("57014 hint missing %q: got %q", want, msg)
 	}
 
 	// Raw ctx deadline -> query-timeout hint.
 	ctxErr := wrapQueryError(context.DeadlineExceeded)
-	if want := fmt.Sprintf("query exceeded query-timeout (%s)", queryTimeout); !strings.Contains(ctxErr.Error(), want) {
+	if want := fmt.Sprintf("query exceeded query-timeout (%s)", QueryTimeout); !strings.Contains(ctxErr.Error(), want) {
 		t.Fatalf("ctx hint missing %q: got %q", want, ctxErr.Error())
 	}
 
@@ -270,9 +272,9 @@ func TestEncodePgtypeNumeric(t *testing.T) {
 		{pgtype.Numeric{Int: big.NewInt(150), Exp: -2, Valid: true}, `"1.50"`},
 		{pgtype.Numeric{Int: big.NewInt(-271828), Exp: -5, Valid: true}, `"-2.71828"`},
 		{pgtype.Numeric{Int: bigSum, Valid: true}, `"9007199254740993"`},
-		{pgtype.Numeric{Valid: false}, `null`},                    // NULL
-		{pgtype.Numeric{NaN: true, Valid: true}, `"NaN"`},         // NaN
-		{(*pgtype.Numeric)(nil), `null`},                          // nil pointer
+		{pgtype.Numeric{Valid: false}, `null`},                      // NULL
+		{pgtype.Numeric{NaN: true, Valid: true}, `"NaN"`},           // NaN
+		{(*pgtype.Numeric)(nil), `null`},                            // nil pointer
 		{&pgtype.Numeric{Int: big.NewInt(42), Valid: true}, `"42"`}, // pointer form
 	}
 	for _, c := range cases {
@@ -313,12 +315,12 @@ func TestResultFieldOrder_MetadataBeforeRows(t *testing.T) {
 }
 
 func TestTruncationNotice(t *testing.T) {
-	big := truncationNotice(maxBytes + 1)
-	if !strings.Contains(big, "single row") || !strings.Contains(big, "substring()") {
+	big := result.TruncationNotice(maxBytes + 1)
+	if !strings.Contains(big, "single row") || !strings.Contains(big, "fewer/narrower columns") {
 		t.Fatalf("single-row notice wrong: %q", big)
 	}
 	for _, chunk := range []int{0, 100, maxBytes} { // row-cap and mid-stream cases
-		gen := truncationNotice(chunk)
+		gen := result.TruncationNotice(chunk)
 		if !strings.Contains(gen, "maxRows") || strings.Contains(gen, "single row") {
 			t.Fatalf("generic notice wrong for chunk=%d: %q", chunk, gen)
 		}
@@ -384,5 +386,74 @@ func TestLooksNumeric(t *testing.T) {
 		if looksNumeric(s) {
 			t.Errorf("looksNumeric(%q)=true, want false", s)
 		}
+	}
+}
+
+func TestEncodeUUIDCanonicalString(t *testing.T) {
+	// Live-session finding (2026-09-03): uuid columns came back as a JSON
+	// array of 16 byte numbers ([132,246,…]) — rows.Values() hands a bare
+	// [16]byte, a different type from []byte, so it fell through to default
+	// json.Marshal. Must render the canonical 8-4-4-4-12 string instead.
+	// The struct form (pgtype.UUID) must behave identically.
+	b := [16]byte{0x84, 0xf6, 0x13, 0x5f, 0xb5, 0xd9, 0x42, 0xb6,
+		0xb2, 0x82, 0x20, 0x39, 0xa0, 0xaf, 0x0c, 0x55}
+	for _, v := range []any{b, pgtype.UUID{Bytes: b, Valid: true}} {
+		e := newRowEncoder([]uint32{oidUUID})
+		row, _, err := e.encode([]any{v})
+		if err != nil {
+			t.Fatalf("encode(%T): %v", v, err)
+		}
+		enc, err := jsonMarshal(row[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := `"84f6135f-b5d9-42b6-b282-2039a0af0c55"`; string(enc) != want {
+			t.Fatalf("uuid %T not canonical string: got %s want %s", v, enc, want)
+		}
+	}
+	// Invalid struct uuid is NULL, not a zeroed uuid string.
+	e := newRowEncoder([]uint32{oidUUID})
+	row, _, err := e.encode([]any{pgtype.UUID{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row[0] != nil {
+		t.Fatalf("invalid uuid must encode to null, got %v", row[0])
+	}
+}
+
+func TestEncodePGTimeAsText(t *testing.T) {
+	// Live-session finding (2026-09-03): time columns came back as
+	// {"Microseconds":…,"Valid":true}. Must render PG's HH:MM:SS[.FFFFFF]
+	// text shape (trailing zero fraction trimmed, like PG).
+	e := newRowEncoder([]uint32{oidTime})
+	cases := []struct {
+		in   pgtype.Time
+		want string
+	}{
+		{pgtype.Time{Microseconds: 66768657885, Valid: true}, `"18:32:48.657885"`},
+		{pgtype.Time{Microseconds: 45230_000_000, Valid: true}, `"12:33:50"`},
+		{pgtype.Time{Microseconds: 0, Valid: true}, `"00:00:00"`},
+	}
+	for _, c := range cases {
+		row, _, err := e.encode([]any{c.in})
+		if err != nil {
+			t.Fatalf("encode(%+v): %v", c.in, err)
+		}
+		enc, err := jsonMarshal(row[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(enc) != c.want {
+			t.Fatalf("encode(%+v) = %s, want %s", c.in, enc, c.want)
+		}
+	}
+	// NULL time stays null.
+	row, _, err := e.encode([]any{pgtype.Time{Valid: false}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row[0] != nil {
+		t.Fatalf("invalid time must encode to null, got %v", row[0])
 	}
 }

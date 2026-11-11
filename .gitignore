@@ -6,9 +6,19 @@
 .env
 .env.*
 
+# Anonymization rules — the filled-in copy contains the keywords being hidden
+anonymize.yaml
+
 # Editor / OS noise
 .DS_Store
 *.swp
 
 # Local ZCode session artifacts (plans, etc.)
 .zcode/
+
+# Throwaway PLM survey runner (reports/2026-09-26_plm-1c-survey.md §Готовая инфраструктура)
+/plm-survey/
+
+
+# Binary survey deliverables (the .md reports stay in git)
+reports/*.xlsx

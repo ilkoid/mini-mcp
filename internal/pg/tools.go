@@ -1,19 +1,19 @@
-// Package main — MCP tool definitions for mcp-pg-readonly.
+// Package pg — MCP tool definitions for mcp-pg-readonly.
 //
 // Three read-only tools (design §5), each carrying the mandatory annotation
 // set {readOnlyHint:true, destructiveHint:false, idempotentHint:true}. The
 // destructiveHint is a *bool specifically so an explicit "false" survives
 // JSON marshalling (a plain bool:false with omitempty would be dropped) — this
 // matters because the ZCode plan-mode predicate is `isMcp && !destructive`.
-package main
+package pg
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
 
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // ptr returns a pointer to v — used so destructiveHint/OpenWorldHint (*bool
@@ -52,11 +52,20 @@ type describeTableInput struct {
 // (mcp_ro locally, e.g. arm_ai_ro on the poncho-ai prod instance). Never
 // hardcode a role/env name here — a wrong hint sends the agent after
 // credentials that don't exist on that host.
-const queryDescriptionFmt = "Read-only SQL against PostgreSQL (role %s, READ ONLY transaction). Returns JSON {columns, row_count, truncated, notice, rows}. Caps: 500 rows / 48KB. int8/numeric values (count(*), sum/avg/round results) arrive as JSON STRINGS to preserve precision — cast ::int or ::float8 in SQL when you need a JSON number (never cast IDs like nm_id to float). Prefer aggregates (GROUP BY / windows) over raw dumps of large fact tables (e.g. sales). Use $1,$2 placeholders for values. For heavier read-only analytics (beyond these caps or near the timeout), run psql directly with the SAME read-only role (%s, PGPASSWORD=$%s — NEVER the admin password) and set your own statement_timeout there; the role is SELECT-only, so this stays safe."
+const queryDescriptionFmt = "Read-only SQL against PostgreSQL (role %s, READ ONLY transaction). Returns JSON {columns, row_count, truncated, notice, rows}. Caps: 4000 rows / 48KB; for full result sets paginate with LIMIT/OFFSET and repeat. int8/numeric values (count(*), sum/avg/round results) arrive as JSON STRINGS to preserve precision — cast ::int or ::float8 in SQL when you need a JSON number (never cast IDs like nm_id to float). Prefer aggregates (GROUP BY / windows) over raw dumps of large fact tables (e.g. sales). Use $1,$2 placeholders for values. Output is ANONYMIZED: sensitive keywords are replaced with aliases by the server (this is not configurable from your side); when filtering (WHERE/JOIN), use the ALIAS values you saw in previous results — they are translated back transparently; for text equality on anonymized values prefer ILIKE over '=' (the restored keyword spelling may differ in case from the stored value, and PostgreSQL '=' is case-sensitive and would silently return 0 rows). String-extraction, hash and length functions (left/right/substring/split_part/md5/sha*/encode/length/strpos/…) are BLOCKED by the anonymization guard — they can leak derivatives of sensitive values; select the column itself or use aggregates instead. Partial LIKE/ILIKE patterns (like '%%frag%%') are NOT translated and may behave unexpectedly — prefer full-value filters (a pattern containing the whole alias works). The same visible alias may legitimately appear as two GROUP BY rows (two data eras of stored values), and full-literal equality/pattern filters on an alias are auto-expanded to all stored spellings when configured. For heavier read-only analytics (beyond these caps or near the timeout), run psql directly with the SAME read-only role (%s, PGPASSWORD=$%s — NEVER the admin password) and set your own statement_timeout there; the role is SELECT-only, so this stays safe."
 
-// registerTools wires the three read-only tools onto the server. role/pwdEnv
+// toolErr builds the standard error result. Error text is masked: DB error
+// messages happily echo values (duplicate-key details, conversion errors) and
+// must not leak keywords into the session.
+func toolErr(err error) (*mcp.CallToolResult, any, error) {
+	var r mcp.CallToolResult
+	r.SetError(Anonymizer.ApplyErr(err))
+	return &r, nil, nil
+}
+
+// RegisterTools wires the three read-only tools onto the server. role/pwdEnv
 // feed the description (see queryDescriptionFmt).
-func registerTools(s *mcp.Server, pool *pgxpool.Pool, role, pwdEnv string) {
+func RegisterTools(s *mcp.Server, pool *pgxpool.Pool, role, pwdEnv string) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "pg_readonly_query",
 		Title:       "Read-only SQL query",
@@ -67,13 +76,11 @@ func registerTools(s *mcp.Server, pool *pgxpool.Pool, role, pwdEnv string) {
 		for i, a := range in.Args {
 			args[i] = a
 		}
-		res, err := runReadOnly(ctx, pool, in.SQL, args)
+		res, err := RunReadOnly(ctx, pool, in.SQL, args)
 		if err != nil {
 			// Surface tool errors inside Content with IsError=true (MCP spec),
 			// not as a protocol error — so the LLM can self-correct.
-			var r mcp.CallToolResult
-			r.SetError(err)
-			return &r, nil, nil
+			return toolErr(err)
 		}
 		return resultJSON(res)
 	})
@@ -96,11 +103,9 @@ func registerTools(s *mcp.Server, pool *pgxpool.Pool, role, pwdEnv string) {
 		             FROM information_schema.tables
 		             WHERE table_schema = $1 AND table_name LIKE $2
 		             ORDER BY table_name`
-		res, err := runReadOnly(ctx, pool, sql, []any{schema, pattern})
+		res, err := RunReadOnly(ctx, pool, sql, []any{schema, pattern})
 		if err != nil {
-			var r mcp.CallToolResult
-			r.SetError(err)
-			return &r, nil, nil
+			return toolErr(err)
 		}
 		return resultJSON(res)
 	})
@@ -116,21 +121,15 @@ func registerTools(s *mcp.Server, pool *pgxpool.Pool, role, pwdEnv string) {
 			schema = "public"
 		}
 		if in.Table == "" {
-			var r mcp.CallToolResult
-			r.SetError(fmt.Errorf("table is required"))
-			return &r, nil, nil
+			return toolErr(fmt.Errorf("table is required"))
 		}
-		out, err := describeTable(ctx, pool, schema, in.Table)
+		out, err := DescribeTable(ctx, pool, schema, in.Table)
 		if err != nil {
-			var r mcp.CallToolResult
-			r.SetError(err)
-			return &r, nil, nil
+			return toolErr(err)
 		}
 		b, err := json.Marshal(out)
 		if err != nil {
-			var r mcp.CallToolResult
-			r.SetError(err)
-			return &r, nil, nil
+			return toolErr(err)
 		}
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: string(b)}},
@@ -154,17 +153,17 @@ func resultJSON(res *Result) (*mcp.CallToolResult, any, error) {
 
 // describeOutput is the structured shape of pg_describe_table's JSON.
 type describeOutput struct {
-	Schema      string          `json:"schema"`
-	Table       string          `json:"table"`
-	Columns     []tableColumn   `json:"columns"`
-	Constraints []tableConstr   `json:"constraints,omitempty"`
-	Indexes     []tableIndex    `json:"indexes,omitempty"`
+	Schema      string        `json:"schema"`
+	Table       string        `json:"table"`
+	Columns     []tableColumn `json:"columns"`
+	Constraints []tableConstr `json:"constraints,omitempty"`
+	Indexes     []tableIndex  `json:"indexes,omitempty"`
 }
 
 type tableColumn struct {
-	Name        string `json:"name"`
-	DataType    string `json:"data_type"`
-	IsNullable  bool   `json:"is_nullable"`
+	Name          string `json:"name"`
+	DataType      string `json:"data_type"`
+	IsNullable    bool   `json:"is_nullable"`
 	ColumnDefault string `json:"column_default,omitempty"`
 }
 
@@ -180,13 +179,13 @@ type tableIndex struct {
 	Def    string `json:"definition"`
 }
 
-// describeTable runs the three small catalog queries that back
+// DescribeTable runs the three small catalog queries that back
 // pg_describe_table. Each runs in its own read-only transaction (they're
 // independent), so a failure in one still leaves the others readable.
-func describeTable(ctx context.Context, pool *pgxpool.Pool, schema, table string) (*describeOutput, error) {
-	out := &describeOutput{Schema: schema, Table: table}
+func DescribeTable(ctx context.Context, pool *pgxpool.Pool, schema, table string) (*describeOutput, error) {
+	out := &describeOutput{Schema: Anonymizer.Apply(schema), Table: Anonymizer.Apply(table)}
 
-	colRes, err := runReadOnly(ctx, pool, `
+	colRes, err := RunReadOnly(ctx, pool, `
 		SELECT column_name, data_type,
 		       (is_nullable = 'YES'),
 		       column_default::text
@@ -232,7 +231,7 @@ func describeTable(ctx context.Context, pool *pgxpool.Pool, schema, table string
 		out.Columns = append(out.Columns, c)
 	}
 
-	conRes, err := runReadOnly(ctx, pool, `
+	conRes, err := RunReadOnly(ctx, pool, `
 		SELECT tc.constraint_name, tc.constraint_type,
 		       string_agg(kcu.column_name, ',' ORDER BY kcu.ordinal_position)
 		FROM information_schema.table_constraints tc
@@ -273,7 +272,7 @@ func describeTable(ctx context.Context, pool *pgxpool.Pool, schema, table string
 		out.Constraints = append(out.Constraints, c)
 	}
 
-	idxRes, err := runReadOnly(ctx, pool, `
+	idxRes, err := RunReadOnly(ctx, pool, `
 		SELECT indexname, indexdef
 		FROM pg_indexes
 		WHERE schemaname = $1 AND tablename = $2

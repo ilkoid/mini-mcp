@@ -1,4 +1,4 @@
-package main
+package pg
 
 import (
 	"encoding/json"
