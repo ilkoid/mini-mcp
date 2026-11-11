@@ -20,6 +20,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -37,6 +38,11 @@ import (
 // the redirect cap for free.
 const defaultHTTPTimeout = 20 * time.Second
 
+// version is the server (and bridge /health) version. 0.2.0 = level 4:
+// the real-browser bridge (bridge.go + extension/) on top of web_search and
+// read_url.
+const version = "0.2.0"
+
 func main() {
 	log.SetFlags(0)
 	log.SetPrefix("mcp-websearch: ")
@@ -45,14 +51,37 @@ func main() {
 	log.SetOutput(os.Stderr)
 
 	var (
-		selftest = flag.Bool("selftest", false, "run a live search + read_url check, then exit (prints to stderr)")
-		timeout  = flag.Duration("timeout", defaultHTTPTimeout, "per-request HTTP timeout (default: 20s)")
+		selftest       = flag.Bool("selftest", false, "run a live search + read_url check, then exit (prints to stderr)")
+		selftestBridge = flag.Bool("selftest-bridge", false, "run a live level-4 bridge check (needs the extension loaded in a real browser), then exit")
+		profileFetch   = flag.String("profile-fetch", "", "one-shot level-4 fetch: run ONE profile_fetch job for this URL, print the envelope to stderr, exit")
+		profileTab     = flag.String("profile-tab", "", "one-shot level-4 tab read: run ONE profile_tab job for this URL, print the envelope to stderr, exit")
+		oneShotRaw     = flag.Bool("raw", false, "with --profile-fetch: raw HTML instead of extracted text")
+		oneShotWaitMs  = flag.Int("wait-ms", 3000, "with --profile-tab: settle time after load, ms (capped at 15000)")
+		timeout        = flag.Duration("timeout", defaultHTTPTimeout, "per-request HTTP timeout (default: 20s)")
+		bridgePort     = flag.Int("bridge-port", 8765, "level-4 bridge port on 127.0.0.1 (must match the extension's host_permissions)")
+		tokenFile      = flag.String("bridge-token-file", "", "level-4 bridge token file (default: ~/.config/mcp-browserbridge/token; created 0600 if missing)")
+		minInterval    = flag.Duration("min-interval", 2*time.Second, "server-enforced pause between bridge jobs (anti-WAF politeness)")
+		bridgeTimeout  = flag.Duration("bridge-timeout", 30*time.Second, "how long to wait for the extension to answer a job")
 	)
 	flag.Parse()
 	httpClient.Timeout = *timeout
 
+	if err := initBridge(*bridgePort, *tokenFile, *minInterval, *bridgeTimeout); err != nil {
+		fmt.Fprintf(os.Stderr, "bridge init: %v\n", err)
+		os.Exit(1)
+	}
+
 	if *selftest {
 		os.Exit(runSelftest(context.Background()))
+	}
+	if *selftestBridge {
+		os.Exit(runSelftestBridge())
+	}
+	if *profileFetch != "" {
+		os.Exit(runOneShotBridge(&Job{ID: newJobID(), Action: actionFetch, URL: *profileFetch, Raw: *oneShotRaw}))
+	}
+	if *profileTab != "" {
+		os.Exit(runOneShotBridge(&Job{ID: newJobID(), Action: actionTabRead, URL: *profileTab, WaitMs: *oneShotWaitMs}))
 	}
 
 	// Serve MCP over stdio. From here on, NOTHING may write to stdout except
@@ -60,7 +89,7 @@ func main() {
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:    "mcp-websearch",
 		Title:   "Local web search",
-		Version: "0.1.0",
+		Version: version,
 	}, nil)
 	registerTools(server)
 
@@ -111,5 +140,80 @@ func runSelftest(ctx context.Context) int {
 	fmt.Fprintf(os.Stderr, "ok: read_url title=%q, %d bytes\n", rd.Title, len(rd.Text))
 
 	fmt.Fprintln(os.Stderr, "selftest: PASS")
+	return 0
+}
+
+// runSelftestBridge exercises level 4 end-to-end: elects the bridge (owner or
+// client), checks the extension is polling /job, then fetches example.com
+// THROUGH the real browser profile. Requires the extension to be loaded in
+// the user's browser — see extension/README.md. Prints to stderr.
+func runSelftestBridge() int {
+	info := bridged.statusInfo()
+	fmt.Fprintf(os.Stderr, "bridge: addr=%s role=%s token=%s\n", info["addr"], info["role"], info["token_file"])
+	if errS, ok := info["error"]; ok {
+		fmt.Fprintf(os.Stderr, "FAIL: bridge election: %v\n", errS)
+		return 1
+	}
+	// grace: a FRESH owner is invisible to the extension until its reconnect
+	// backoff fires (≤5s) — wait before declaring it offline
+	ext, _ := info["extension"].(string)
+	for i := 0; i < 8 && ext == "offline"; i++ {
+		time.Sleep(time.Second)
+		info = bridged.statusInfo()
+		ext, _ = info["extension"].(string)
+		fmt.Fprintf(os.Stderr, "bridge: waiting for the extension… %ds (state: %v)\n", i+1, ext)
+	}
+	switch ext {
+	case "online":
+	case "auth_failing":
+		fmt.Fprintln(os.Stderr, "FAIL: extension polls with a WRONG token — reopen its options page and paste the token from the file above")
+		return 1
+	default:
+		fmt.Fprintln(os.Stderr, "FAIL: extension offline — load it (edge://extensions → Load unpacked → mcp-websearch/extension), paste the token from the file above into its options page, then retry")
+		return 1
+	}
+	fmt.Fprintln(os.Stderr, "bridge: extension online, fetching https://example.com/ through the real profile…")
+	res, err := bridged.dispatch(&Job{ID: newJobID(), Action: actionFetch, URL: "https://example.com/"})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "FAIL: profile fetch of example.com -> %v\n", err)
+		return 1
+	}
+	text, _ := extractHTML([]byte(res.Body))
+	if res.Status != 200 || !strings.Contains(text+res.Body, "Example Domain") {
+		fmt.Fprintf(os.Stderr, "FAIL: unexpected example.com response: status=%d body=%.160q\n", res.Status, res.Body)
+		return 1
+	}
+	fmt.Fprintf(os.Stderr, "ok: status=%d final_url=%s (%d bytes of HTML)\n", res.Status, res.FinalURL, len(res.Body))
+	fmt.Fprintln(os.Stderr, "selftest-bridge: PASS")
+	return 0
+}
+
+// runOneShotBridge executes ONE level-4 job and prints the shaped envelope
+// (the same one the MCP tools return) to stderr. This is the acceptance-run
+// surface: each invocation is its own process, elects the bridge lazily,
+// does its single job and exits — the extension reconnects to the next
+// owner within its 5s backoff, well inside the 30s job timeout. Pacing
+// between separate invocations is the OPERATOR's responsibility (there is
+// no cross-process clock but a human pressing Enter).
+func runOneShotBridge(j *Job) int {
+	info := bridged.statusInfo()
+	fmt.Fprintf(os.Stderr, "bridge: role=%s addr=%s extension=%v\n", info["role"], info["addr"], info["extension"])
+	res, err := bridged.dispatch(j)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "FAIL: %v\n", err)
+		return 1
+	}
+	var out any
+	if j.Action == actionFetch {
+		out = shapeProfileFetch(res, j.Raw)
+	} else {
+		out = shapeProfileTab(res)
+	}
+	b, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "FAIL: shape: %v\n", err)
+		return 1
+	}
+	fmt.Fprintln(os.Stderr, string(b))
 	return 0
 }
