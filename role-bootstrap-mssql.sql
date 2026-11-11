@@ -1,0 +1,39 @@
+-- role-bootstrap-mssql.sql — reference for the mcp-mssql-readonly role.
+--
+-- STATUS: DOCUMENTATION / VERIFICATION ONLY. The ai_reader role already
+-- exists on the DWH instance (owner-confirmed SELECT-only). This file
+-- records the intended grant posture so it can be re-verified; it is NOT a
+-- "run me on prod" script. If a new instance needs the role, adapt and run
+-- as admin.
+--
+-- The role IS the security boundary for the MSSQL server (SQL Server has no
+-- READ ONLY transaction mode, so unlike the PG sibling there is no RO-txn
+-- belt-and-suspenders — see internal/mssql/ro.go). --selftest verifies the
+-- posture read-only through sys.database_permissions + IS_ROLEMEMBER.
+
+-- On a fresh instance (run in the target database, e.g. DWH_MART):
+--
+--   CREATE LOGIN ai_reader WITH PASSWORD = '<set_a_strong_password>', CHECK_POLICY = ON;
+--   CREATE USER ai_reader FOR LOGIN ai_reader;
+--   ALTER ROLE db_datareader ADD MEMBER ai_reader;   -- SELECT on everything
+--
+--   -- Belt-and-suspenders denies (db_datareader grants no writes, but an
+--   -- explicit DENY survives accidental future GRANTs):
+--   DENY INSERT, UPDATE, DELETE, ALTER, CONTROL ON DATABASE::[DWH_MART] TO ai_reader;
+--   DENY EXECUTE ON DATABASE::[DWH_MART] TO ai_reader;
+--   DENY CREATE TABLE, CREATE VIEW, CREATE PROCEDURE TO ai_reader;
+
+-- Verification (read-only, safe to run anytime; mcp-mssql-readonly
+-- --selftest runs the same check):
+--
+--   SELECT pe.class_desc, pe.permission_name, pe.state_desc
+--   FROM sys.database_permissions pe
+--   JOIN sys.database_principals pr ON pe.grantee_principal_id = pr.principal_id
+--   WHERE pr.name = 'ai_reader' AND pe.state IN ('G','W')
+--     AND pe.permission_name NOT IN ('SELECT','VIEW DEFINITION','CONNECT','SHOWPLAN');
+--   -- expect: 0 rows
+--
+--   SELECT IS_ROLEMEMBER('db_datawriter') AS w,
+--          IS_ROLEMEMBER('db_owner')      AS o,
+--          IS_ROLEMEMBER('db_ddladmin')   AS d;
+--   -- expect: 0 0 0
