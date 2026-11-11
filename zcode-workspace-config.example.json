@@ -1,0 +1,50 @@
+// Template for the analysts' workspace (NOT this repo): E:\ARM_AI\.zcode\config.json
+// Workspace scope: every analyst who opens E:\ARM_AI in ZCode gets the MCP
+// server auto-connected. Requires access to E:\ARM_AI (AD group).
+//
+// No secrets here — the password comes from E:\ARM_AI\.config\mcp-pg-readonly\env.cmd
+// via the wrapper (pointed there by MCP_PG_SECRETS below), the anonymization
+// rules from anonymize.yaml next to it (--anon-config). Both are ACL-locked.
+// Keep "command" a STRING with forward slashes.
+{
+  "mcp": {
+    "servers": {
+      "pg-anon": {
+        "type": "stdio",
+        "command": "C:/Users/Public/bin/mcp-pg-readonly-run.cmd",
+        "args": [
+          "--database", "wb_data_prod",
+          "--user", "arm_ai_ro",
+          "--password-env", "PG_USER_PWD",
+          "--anon-config", "E:/ARM_AI/.config/mcp-pg-readonly/anonymize.yaml",
+          "--statement-timeout", "10m",
+          "--query-timeout", "12m"
+        ],
+        "timeoutMs": 800000,
+        "env": {
+          "PGHOST": "10.120.24.155",
+          "PGPORT": "5432",
+          "MCP_PG_SECRETS": "E:\\ARM_AI\\.config\\mcp-pg-readonly\\env.cmd"
+        }
+      },
+      "pg-anon-test": {
+        "type": "stdio",
+        "command": "C:/Users/Public/bin/mcp-pg-readonly-run.cmd",
+        "args": [
+          "--database", "wb_data_test",
+          "--user", "arm_ai_ro",
+          "--password-env", "PG_USER_PWD",
+          "--anon-config", "E:/ARM_AI/.config/mcp-pg-readonly/anonymize.yaml",
+          "--statement-timeout", "4m",
+          "--query-timeout", "6m"
+        ],
+        "timeoutMs": 400000,
+        "env": {
+          "PGHOST": "10.120.24.155",
+          "PGPORT": "5432",
+          "MCP_PG_SECRETS": "E:\\ARM_AI\\.config\\mcp-pg-readonly\\env.cmd"
+        }
+      }
+    }
+  }
+}

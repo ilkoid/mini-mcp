@@ -1,0 +1,112 @@
+# Anonymization rules for mcp-pg-readonly AND mcp-mssql-readonly (one shared
+# file masks both servers; the VPS deployment points both --anon-config
+# flags at the same copy).
+#
+# Copy this file to %USERPROFILE%\.config\mcp-pg-readonly\anonymize.yaml
+# and fill in the REAL keywords. THE COPY IS A SECRET: it contains the very
+# values you are hiding. Same handling as env.cmd:
+#   - NEVER commit the filled-in file (it is in .gitignore as anonymize.yaml)
+#   - lock it down: icacls anonymize.yaml /inheritance:r /grant:r "%USERNAME%:F"
+#   - never paste its contents into an AI session, ticket, or log
+#
+# Rule fields (naming follows the established anonymizer convention):
+#   read_substring:  the real value stored in the database. Matched as a
+#                    CASE-INSENSITIVE substring by default (SampleBrand /
+#                    SAMPLEBRAND / samplebrand all match); longest
+#                    read_substring wins when rules overlap.
+#   write_substring: the alias inserted VERBATIM, exactly as written. Must
+#                    NOT be empty. The agent sees this alias and uses it in
+#                    WHERE/JOIN — it is translated back to the real value
+#                    inside the MCP process before the query executes, so
+#                    filtering by alias works and the session never sees the
+#                    original in either direction. An all-UPPERCASE matched
+#                    token (upper(col) computed in the DB) gets the
+#                    UPPERCASE alias, so both data eras render identically.
+#   eq_any:          optional list of EVERY stored spelling of the value —
+#                    case variants AND the literal alias itself when an
+#                    upstream anonymizer already wrote it into newer rows
+#                    (two-era data). A full-literal = / LIKE / ILIKE filter
+#                    by the agent is rewritten into a multi-variant
+#                    comparison (= ANY(ARRAY[...]) on PG, IN (...) on
+#                    MSSQL) that hits ALL spellings. Entries are deduplicated
+#                    EXACTLY (case differences are the point: '=' is
+#                    case-sensitive). Without eq_any nothing is rewritten.
+#
+# Optional per-rule flags:
+#   case_sensitive: true   # match the exact spelling only (default: false)
+#   exact: true            # replace only when the WHOLE cell equals
+#                          # read_substring (default: false — every occurrence)
+#
+# PITFALLS confirmed by live testing (2026-09-03) — read before picking values:
+#
+# 1. Write read_substring in the EXACT CASE the database stores. Masking is
+#    case-insensitive (any spelling is hidden), but the reverse translation
+#    inserts read_substring VERBATIM into the agent's SQL and PostgreSQL '='
+#    is case-sensitive: if the rule says "Samplebrand" while the table stores
+#    "SampleBrand", WHERE col = 'Alias' silently returns 0 rows (ILIKE still
+#    finds them). Align the rule's spelling with the data — or list the other
+#    spelling in eq_any so '=' filters auto-expand to it.
+#
+# 2. Pick a write_substring that NEVER occurs in real data. A row whose value
+#    literally equals the alias is indistinguishable from masked rows
+#    (duplicate GROUP BY entries) and can never be filtered by the agent —
+#    the alias in any query is always translated to the real keyword.
+#    Prefer clearly synthetic aliases (e.g. "Бренд-АЛТ-1"), not plausible
+#    names that might exist in the catalog.
+#
+#    Deliberate exception — upstream anonymizer continuity: if an autonomous
+#    anonymizer has ALREADY written the alias into newer data rows, reusing
+#    that exact alias here is a valid continuity choice (both eras display
+#    identically). Accept the tradeoffs: (a) GROUP BY shows TWO rows with the
+#    same visible name — pre-migration rows (masked) and post-migration rows
+#    (literal); count(DISTINCT col) may exceed the number of visible aliases;
+#    (b) WITHOUT eq_any, WHERE filters by the alias reach ONLY the
+#    pre-migration rows — configure eq_any (see above) to make '=' filters
+#    cover BOTH eras; partial patterns (ILIKE '%Frag%') are never translated.
+#
+# 3. DERIVATIVE LEAKS (independent test report 2026-09-03, Д-1/Д-2/Д-3):
+#    string functions computed in the DB (left(col,4), md5(col), length(col))
+#    bypass full-keyword masking. The server now blocks those functions
+#    query-wide (substring/hash/length families) and redacts surviving
+#    keyword fragments in output. Tunables in the security: section below.
+#    Keep keywords long and distinctive: every 4+-character run of the
+#    keyword that appears in innocent data (e.g. a fragment "play" inside
+#    "playlist") can trigger a false redaction — raise fragment_min_len if
+#    that bites, never lower it below 4.
+#
+# A numeric-looking read_substring (digits only, e.g. INN/OGRN) additionally
+# matches numeric cells (bigint/numeric) by their exact value; the cell is
+# returned as the alias STRING. Filtering by such a numeric alias is not
+# supported — filter on other columns.
+#
+# Validation fails closed (the server refuses to start) on: empty
+# read_substring or write_substring, read_substring equal to write_substring,
+# duplicates of either (ambiguous reverse mapping), and chained rules
+# (write_substring containing another rule's read_substring).
+#
+# security:            <- tunables of the derivative guards (all optional)
+#   fragment_min_len: 4        # output fragment-guard threshold; 0/omitted = 4,
+#                              # negative disables the guard (not recommended)
+#   blocked_functions_override: []   # REPLACES the dialect default blocklist
+#                              # wholesale (left/md5/length/... on PG;
+#                              # LEFT/HASHBYTES/LEN/... on MSSQL). Only shrink
+#                              # it if a blocked function is genuinely needed —
+#                              # every removed name reopens that leak class.
+#
+# rules: []            <- deliberate "no masking" instance: keep this line
+rules:
+  # --- placeholders: replace with your real values, then delete this block ---
+  - read_substring: "ООО Пример-Компания"
+    write_substring: "Клиент-1"
+  - read_substring: "Иван Иванович Иванов"
+    write_substring: "Персона-1"
+  - read_substring: "7701234567"          # numeric keyword (ИНН) — matches bigint cells
+    write_substring: "ИНН-1"
+  - read_substring: ".internal.example.com"
+    write_substring: ".host-1.internal"
+  # Two-era example: the alias was already written into newer rows by the
+  # upstream anonymizer, and old rows also store a lowercase spelling.
+  # '=' / LIKE / ILIKE filters by the agent expand to ALL three spellings.
+  # - read_substring: "SampleWord"
+  #   write_substring: "AliasWord"
+  #   eq_any: ["sampleword", "AliasWord"]

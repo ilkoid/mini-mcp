@@ -87,7 +87,7 @@ go version
 git clone https://github.com/ilkoid/mini-mcp.git %USERPROFILE%\dev\mini-mcp
 cd /d %USERPROFILE%\dev\mini-mcp
 mkdir %USERPROFILE%\bin 2>nul
-go build -o %USERPROFILE%\bin\mcp-pg-readonly.exe .
+go build -o %USERPROFILE%\bin\mcp-pg-readonly.exe .\cmd\mcp-pg-readonly
 copy /Y mcp-pg-readonly-run.cmd %USERPROFILE%\bin\mcp-pg-readonly-run.cmd
 go test ./...
 ```
@@ -159,6 +159,41 @@ icacls "%USERPROFILE%\.config\mcp-pg-readonly\env.cmd" /inheritance:r /grant:r "
 - Путь к секретам можно переопределить переменной `MCP_PG_SECRETS`, если
   держите несколько файлов (по одному на хост с разными паролями).
 
+### 4.1. Файл правил анонимизации (anonymize.yaml) — тоже секрет
+
+Сервер **обязан** получить файл правил `--anon-config` (по умолчанию ищется в
+`%USERPROFILE%\.config\mcp-pg-readonly\anonymize.yaml`; без валидного файла
+бинарь откажется стартовать — fail-closed). В файле лежат **сами скрываемые
+слова**, поэтому обращение с ним — как с `env.cmd`:
+
+```cmd
+copy anonymize.example.yaml %USERPROFILE%\.config\mcp-pg-readonly\anonymize.yaml
+notepad %USERPROFILE%\.config\mcp-pg-readonly\anonymize.yaml
+icacls "%USERPROFILE%\.config\mcp-pg-readonly\anonymize.yaml" /inheritance:r /grant:r "%USERNAME%:F"
+```
+
+Формат и семантика — в комментариях внутри `anonymize.example.yaml`:
+`read_substring` — реальное значение в базе (ищется как подстрока без учёта
+регистра), `write_substring` — псевдоним, который вставляется дословно и
+не может быть пустым. Числовые ключевые слова (ИНН и т.п.) дополнительно
+матчат числовые ячейки.
+
+Как это работает в обе стороны:
+
+- **Выход**: ключевые слова заменяются псевдонимами во всём, что уходит агенту
+  (значения ячеек, включая внутренности json/jsonb, имена колонок, notices,
+  **тексты ошибок** — ошибки БД любят цитировать значения).
+- **Вход**: агент знает только псевдонимы, поэтому его
+  `WHERE client = 'Клиент-7'` внутри процесса MCP молча переводится обратно в
+  реальное значение, запрос выполняется, результат снова маскируется.
+  Реальное слово не попадает в сессию **ни в одну сторону**; фильтрация по
+  псевдонимам работает прозрачно.
+
+Правила: заполненный `anonymize.yaml` **никогда** не коммитится (в
+`.gitignore`), не логируется и не показывается никаким инструментом; бинарь
+сообщает только количество правил. Инстанс без маскирования использует файл с
+`rules: []` — это осознанный видимый выбор, а не забытый конфиг.
+
 ## 5. Роль для чтения на PG — три варианта
 
 **Вариант А — существующий PG с общей ролью `mcp_ro` (192.168.10.7:15432).**
@@ -179,7 +214,8 @@ Bootstrap не нужен — бинарник умеет любую роль ч
 - описание инструмента `pg_readonly_query` само подставляет фактические роль
   и имя env-переменной — psql-подсказка агента не укажет на чужие креды;
 - **проверьте, что роль действительно SELECT-only.** Write-probe в selftest
-  проверяет READ ONLY-транзакцию сервера, а не гранты роли, а psql-обход
+  теперь клиентский (precheck, на сервер не отправляется), READ
+  ONLY-транзакция проверяется отдельно, а psql-обход
   (раздел 9) безопасен ровно постольку, поскольку роль не умеет писать.
   Один раз под `arm_ai_ro` (через psql или сам MCP):
 
@@ -235,16 +271,23 @@ set PG_ADMIN_PWD=<пароль postgres>
 Ожидание в stderr (и только там):
 
 ```
+anonymizer: N rule(s) loaded from ...
 ok: SELECT 1 -> 1 row(s)
 ok: numeric probe -> round(numeric) as exact string
-ok: write probe rejected as expected (...)
-ok: row cap engaged at 500 rows (truncated=true)
+ok: write probe rejected by CLIENT precheck (no write statement was sent to the server)
+ok: role holds no non-SELECT table grants (catalog)
+ok: queries run inside a READ ONLY transaction
+ok: row cap engaged at 4000 rows (truncated=true)
+ok: anonymizer active (N rule(s))
 selftest: PASS
 ```
 
-Write probe **обязан** упасть — это сквозная проверка read-only границы.
-Затем то же самое с `--database wb_data_prod` (осознанно, отдельным вызовом).
-Для варианта Б selftest зовётся с ролью этого PG:
+Write-probe теперь **клиентский**: precheck отклоняет write-запрос ещё до
+отправки на сервер — в рабочие базы не отправляется ни одного write-запроса,
+даже «должного упасть». Реальная граница остаётся роль + READ ONLY-транзакция,
+а каталог грантов (`information_schema.role_table_grants`) делает ошибочную
+роль видимой. Затем то же самое с `--database wb_data_prod` (осознанно,
+отдельным вызовом). Для варианта Б selftest зовётся с ролью этого PG:
 `mcp-pg-readonly-run.cmd --selftest --database wb_data_prod --user arm_ai_ro --password-env PG_USER_PWD`.
 
 Типичные ошибки здесь: `error: empty password` → кавычки/спецсимвол в env.cmd
@@ -263,15 +306,15 @@ Write probe **обязан** упасть — это сквозная прове
       "pg-readonly": {
         "type": "stdio",
         "command": "C:/Users/ВАШ_ЮЗЕР/bin/mcp-pg-readonly-run.cmd",
-        "args": ["--database", "wb_data_prod"],
-        "timeoutMs": 200000,
+        "args": ["--database", "wb_data_prod", "--statement-timeout", "10m", "--query-timeout", "12m"],
+        "timeoutMs": 800000,
         "env": { "PGHOST": "192.168.10.7", "PGPORT": "15432" }
       },
       "pg-readonly-test": {
         "type": "stdio",
         "command": "C:/Users/ВАШ_ЮЗЕР/bin/mcp-pg-readonly-run.cmd",
-        "args": ["--database", "wb_data_test"],
-        "timeoutMs": 200000,
+        "args": ["--database", "wb_data_test", "--statement-timeout", "4m", "--query-timeout", "6m"],
+        "timeoutMs": 400000,
         "env": { "PGHOST": "192.168.10.7", "PGPORT": "15432" }
       }
     }
@@ -285,15 +328,14 @@ Write probe **обязан** упасть — это сквозная прове
   `command.trim is not a function`), слэши прямые `/`, указывает на
   **launcher `.cmd`**, не на `.exe` напрямую — launcher подхватывает пароль.
 - Ключ `env`, не легаси `environment`.
-- **`timeoutMs: 200000` обязательно.** Клиентский дефолт — 30 секунд, а
-  `statement_timeout` сервера — 2 минуты: без `timeoutMs` любые более-менее
-  длительные запросы падают по клиентскому таймауту (именно этот симптом и
-  приводил к перенастройке таймаутов). Три слоя, порядок строгий:
-  `--statement-timeout` (2мин) < `--query-timeout` (3мин) < `timeoutMs`
-  (200000мс). Бинарь откажется стартовать, если query-timeout ≤
-  statement-timeout. Поднимать — только все три вместе, например
-  `args: ["--database","wb_data_prod","--statement-timeout","5m","--query-timeout","6m"]`
-  + `"timeoutMs": 400000`.
+- **`timeoutMs` обязателен** (клиентский дефолт — 30 секунд, длительные
+  запросы падают по клиенту). Дефолты бинарей: statement 2мин < query 3мин.
+  Текущая боевая настройка ARM (2026-09-04, после живых таймаутов на
+  аналитике): прод `pg-anon` — `--statement-timeout 10m --query-timeout 12m`
+  + `timeoutMs: 800000`; остальные записи — `4m/6m` + `timeoutMs: 400000`.
+  Три слоя, порядок строгий: statement < query < timeoutMs; бинарь
+  откажется стартовать, если query-timeout ≤ statement-timeout. Поднимать —
+  только все три вместе.
 - Prod и test — **разные имена серверов**, чтобы selftest физически не мог
   попасть в прод.
 - Пароля в этом JSON нет и не должно быть.
@@ -307,14 +349,95 @@ Write probe **обязан** упасть — это сквозная прове
   "type": "stdio",
   "command": "C:/Users/ВАШ_ЮЗЕР/bin/mcp-pg-readonly-run.cmd",
   "args": ["--database", "wb_data_prod",
-           "--user", "arm_ai_ro", "--password-env", "PG_USER_PWD"],
-  "timeoutMs": 200000,
+           "--user", "arm_ai_ro", "--password-env", "PG_USER_PWD",
+           "--statement-timeout", "10m", "--query-timeout", "12m"],
+  "timeoutMs": 800000,
   "env": { "PGHOST": "10.120.24.155", "PGPORT": "5432" }
 }
 ```
 
 После правки — **полный перезапуск ZCode** → Settings → MCP: оба сервера
 зелёные, `toolCount: 3`.
+
+### 7.1. Командная установка: все аналитики на одном VPS (доступ к E:\ARM_AI)
+
+Когда несколько аналитиков работают на одном Windows VPS и их доступ к общей
+области `E:\ARM_AI` разграничивается **группой Active Directory**, схема такая:
+
+| Что | Где | Доступ |
+|---|---|---|
+| `mcp-pg-readonly.exe` + обёртка | `C:\Users\Public\bin\` (общие, ставит админ один раз) | чтение для всех учёток |
+| `env.cmd` (пароль) + `anonymize.yaml` (слова) | `E:\ARM_AI\.config\mcp-pg-readonly\` — **одни на всех** | сейчас только `wsl`; потом AD-группа (`icacls /grant`) |
+| Запись MCP-сервера | `E:\ARM_AI\.zcode\config.json` (workspace-скоуп) | у кого есть доступ к E:\ARM_AI |
+
+Регистрация через **workspace-скоуп**: файл коммитится/кладётся в проект,
+сервер подключается автоматически у каждого, кто открыл проект в ZCode
+(личная запись с тем же именем сильнее). Пока AD-группы нет, тестировать под
+своей учёткой можно через **личный** конфиг
+`%USERPROFILE%\.zcode\cli\config.json` — других он не затрагивает; при
+переезде на workspace личные записи убрать.
+
+Шаги админа (один раз на VPS):
+
+```cmd
+cd /d E:\golang_projects\mini-mcp
+mkdir C:\Users\Public\bin 2>nul
+go build -o C:\Users\Public\bin\mcp-pg-readonly.exe .\cmd\mcp-pg-readonly
+copy /Y mcp-pg-readonly-run-vps.cmd C:\Users\Public\bin\mcp-pg-readonly-run.cmd
+```
+
+Скелет секретов (передавать содержимое вне git/чата — RDP-буфер, менеджер
+секретов):
+
+```cmd
+mkdir E:\ARM_AI\.config\mcp-pg-readonly
+notepad E:\ARM_AI\.config\mcp-pg-readonly\env.cmd
+REM      одна строка:  set PG_USER_PWD=<пароль arm_ai_ro>   (без кавычек)
+copy anonymize.example.yaml E:\ARM_AI\.config\mcp-pg-readonly\anonymize.yaml
+notepad E:\ARM_AI\.config\mcp-pg-readonly\anonymize.yaml
+icacls E:\ARM_AI\.config\mcp-pg-readonly /inheritance:r /grant:r "%USERNAME%:(OI)(CI)F"
+icacls E:\ARM_AI\.config\mcp-pg-readonly\env.cmd /inheritance:r /grant:r "%USERNAME%:F"
+icacls E:\ARM_AI\.config\mcp-pg-readonly\anonymize.yaml /inheritance:r /grant:r "%USERNAME%:F"
+```
+
+Проверка (все проверки — только чтение; write-probe клиентский). Обёртка
+`mcp-pg-readonly-run-vps.cmd` уже знает дефолты этого развёртывания —
+секреты `E:\ARM_AI\.config\mcp-pg-readonly\env.cmd` и хост
+`10.120.24.155:5432` — поэтому работает из голой консоли и из ZCode alike:
+
+```cmd
+C:\Users\Public\bin\mcp-pg-readonly-run.cmd --selftest --database wb_data_test ^
+  --user arm_ai_ro --password-env PG_USER_PWD ^
+  --anon-config E:/ARM_AI/.config/mcp-pg-readonly/anonymize.yaml
+```
+
+Ожидаемый вывод — `selftest: PASS` (все `ok:`-строки в stderr). Переопределения
+при необходимости: `MCP_PG_SECRETS` (путь env.cmd), `MCP_PG_BIN` (путь exe),
+`PGHOST`/`PGPORT` (точка развёртывания).
+
+Когда появится AD-группа — добавить её в ACL каталога секретов (одна команда,
+больше ничего не меняется):
+
+```cmd
+icacls E:\ARM_AI\.config\mcp-pg-readonly /grant "ДОМЕН\Группа:(OI)(CI)RX"
+icacls E:\ARM_AI\.config\mcp-pg-readonly\env.cmd /grant "ДОМЕН\Группа:(R)"
+icacls E:\ARM_AI\.config\mcp-pg-readonly\anonymize.yaml /grant "ДОМЕН\Группа:(R)"
+```
+
+Правила этого варианта:
+
+- **Отдельный Windows-пользователь для MCP не нужен**: MCP — дочерний процесс
+  ZCode и работает от той учётки, в чьей сессии запущен ZCode. Граница
+  безопасности — роль БД (`arm_ai_ro`), а не Windows-идентичность.
+- **Пароль и anonymize.yaml — НИКОГДА в `C:\Users\Public`** (читается всеми
+  учётками машины). Только `E:\ARM_AI\.config\...` под ACL группы.
+- Пути exe/секретов переопределяются: `MCP_PG_BIN` (exe) и `MCP_PG_SECRETS`
+  (env.cmd); путь правил — флагом `--anon-config`.
+- Каждая сессия ZCode = свой процесс exe = одно соединение PG (`MaxConns=1`).
+  Если одновременно работают 6+ аналитиков — поднять лимит роли
+  (`ALTER ROLE arm_ai_ro CONNECTION LIMIT 16;`), **не** MaxConns.
+- Анонимизация общая (один `anonymize.yaml` на всех) — единая политика
+  маскирования; обновляется в одном месте.
 
 ## 8. Проверка работы агента
 
@@ -325,7 +448,7 @@ Write probe **обязан** упасть — это сквозная прове
    (`33.33…`), не строка. Это проверка, что подхвачены свежие описания
    инструментов — запущенная сессия держит старый бинарь и старые описания
    до рестарта ZCode.
-3. `SELECT i FROM generate_series(1,600) AS t(i)` → `row_count: 500`,
+3. `SELECT i FROM generate_series(1,5000) AS t(i)` → `row_count: 4000`,
    `truncated: true`, `notice` с советом про агрегаты — проверка канала
    сигнализации об обрезке.
 4. Из план-режима: благодаря явному `destructiveHint:false` в wire-JSON вызов
@@ -342,9 +465,10 @@ Write probe **обязан** упасть — это сквозная прове
   внутри строковых литералов/доллар-кавычек — это данные, не разделители.
 - `SHOW` и `EXPLAIN` разрешены; сессионные (`SET`, `BEGIN`, `PREPARE`, …) —
   отклоняются пречеком.
-- Капы вывода: **500 строк / 48KB**, дальше `truncated: true` + `notice` с
-  конкретным советом (агрегаты вместо выгрузок; для сверхширокой строки —
-  `length()/left()/substring()`).
+- Капы вывода: **4000 строк / 48KB**, дальше `truncated: true` + `notice` с
+  конкретным советом (агрегаты или пагинация LIMIT/OFFSET; для сверхширокой
+  строки — сузить проекцию: `length()/left()/substring()` ЗАБЛОКИРОВАНЫ
+  гардом анонимизации).
 - `int8`/`numeric` приходят **JSON-строками** (точность; `nm_id` > 2^53).
   Для числа — каст в SQL: `count(*)::int`, `round(...)::float8`. ID во float
   не кастовать.
@@ -402,7 +526,7 @@ set PGOPTIONS=-c statement_timeout=10min
 ```cmd
 cd /d %USERPROFILE%\dev\mini-mcp
 git pull
-go build -o %USERPROFILE%\bin\mcp-pg-readonly.exe .
+go build -o %USERPROFILE%\bin\mcp-pg-readonly.exe .\cmd\mcp-pg-readonly
 copy /Y mcp-pg-readonly-run.cmd %USERPROFILE%\bin\mcp-pg-readonly-run.cmd
 ```
 
@@ -424,6 +548,7 @@ copy /Y mcp-pg-readonly-run.cmd %USERPROFILE%\bin\mcp-pg-readonly-run.cmd
 | `too many connections for role "mcp_ro"` | >8 конкурентных сессий роли | `ALTER ROLE mcp_ro CONNECTION LIMIT 16;` — не MaxConns |
 | `count(*)` приходит строкой `"3"` | by design (точность) | `::int` / `::float8` в SQL |
 | Сервер исчез из списка после правки config.json | неизвестный ключ в JSON / `command` массивом | схема строгая; `command` — строка |
+| `error: ... anonymize config ...` при старте | нет/битый `anonymize.yaml` | раздел 4.1: скопировать example, заполнить, проверить YAML; `rules: []` — если маскирование не нужно |
 
 ## Чеклист
 
@@ -432,10 +557,11 @@ copy /Y mcp-pg-readonly-run.cmd %USERPROFILE%\bin\mcp-pg-readonly-run.cmd
 - [ ] `git clone` → `go build` → wrapper скопирован в `%USERPROFILE%\bin`
 - [ ] `go test ./...` зелёный
 - [ ] env.cmd: `set` без кавычек, hex-пароль, icacls закрыт (вариант Б: + `set PG_USER_PWD=…`)
+- [ ] anonymize.yaml: скопирован из example, заполнен, icacls закрыт; в git не попадает (раздел 4.1)
 - [ ] (свой PG) role-bootstrap.sql по test → прод, с реальным владельцем таблиц
 - [ ] (вариант Б) grants-проверка `arm_ai_ro` пустая; selftest с `--user arm_ai_ro --password-env PG_USER_PWD` — PASS
 - [ ] Selftest PASS на test, затем на прод
-- [ ] config.json: `cli` (не v2), command-строка на `.cmd`, `timeoutMs: 200000`, отдельные имена prod/test
+- [ ] config.json: `cli` (не v2), command-строка на `.cmd`, таймауты тремя слоями (раздел 7), отдельные имена prod/test
 - [ ] Полный рестарт ZCode → оба сервера зелёные, `toolCount: 3`
-- [ ] `SELECT round(100.0*1/3)::float8` → число; `generate_series(1,600)` → truncated-notice
+- [ ] `SELECT round(100.0*1/3)::float8` → число; `generate_series(1,5000)` → truncated-notice
 - [ ] Прочитан раздел 10 (git и секреты)

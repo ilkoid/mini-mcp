@@ -1,7 +1,10 @@
-# mcp-pg-readonly
+# mcp-pg-readonly / mcp-mssql-readonly
 
-A tiny **read-only PostgreSQL MCP server** for the ZCode agent. Exposes three
-non-destructive tools over stdio JSON-RPC:
+Two tiny **read-only MCP servers** for the ZCode agent sharing one
+anonymization engine and result envelope.
+
+**mcp-pg-readonly** (PostgreSQL) — three non-destructive tools over stdio
+JSON-RPC:
 
 | Tool | What it does |
 |---|---|
@@ -9,22 +12,65 @@ non-destructive tools over stdio JSON-RPC:
 | `pg_list_tables` | List tables in a schema (defaults to `public`). |
 | `pg_describe_table` | Columns + PK/unique constraints + indexes for one table. |
 
-Read-only is enforced **at the database** by a dedicated `mcp_ro` role (see
-`role-bootstrap.sql`). The server adds belt-and-suspenders: a `READ ONLY`
-transaction, a 2min `statement_timeout`, and 500-row / 48KB output caps. SQL
-parsing is **not** the security boundary — it's only a DX precheck.
+**mcp-mssql-readonly** (SQL Server / DWH) — four tools:
+
+| Tool | What it does |
+|---|---|
+| `mssql_readonly_query` | Run a single T-SQL statement (`@p1,@p2` params) under the `ai_reader` role, with the same caps and anonymization. |
+| `mssql_list_dbs` | List databases on the instance (`sys.databases`). |
+| `mssql_list_tables` | List tables/views (`sys.objects`, all schemas or one). |
+| `mssql_describe_table` | Columns + PK/unique constraints + indexes (key columns) for one table (`sys.columns`/`sys.key_constraints`/`sys.indexes`). |
+
+Read-only is enforced **at the database** by a dedicated role (`mcp_ro` /
+`ai_reader` — see `role-bootstrap.sql`, `role-bootstrap-mssql.sql`). The
+servers add belt-and-suspenders: a `READ ONLY` transaction (PG) or grants
+catalog selftest (MSSQL — SQL Server has no RO txn mode), a statement
+timeout (2min defaults; the prod entry runs 10min), and 4000-row / 48KB output caps. SQL parsing is **not** the security
+boundary — it's only a DX precheck.
+
+## Anonymization (keyword masking)
+
+Every string that leaves the process is passed through a YAML rules file
+(`--anon-config`, **required**, fail-closed):
+
+```yaml
+rules:
+  - read_substring: "ООО Ромашка"  # real value in the DB (SECRET); matched case-insensitively
+    write_substring: "Клиент-7"    # alias inserted verbatim, non-empty; what the agent sees
+```
+
+- **Outbound masking** — cell values (text, json/jsonb insides, numeric cells
+  for digit-only keywords like INN), column names, notices, and **error texts**
+  (DB errors happily echo values) all have keywords replaced with aliases.
+- **Inbound reverse mapping** — the agent only knows aliases, so its
+  `WHERE client = 'Клиент-7'` is translated back to the real value *inside the
+  MCP process* before execution. The session never observes a real keyword in
+  either direction; filtering by alias works transparently.
+- Matching is case-insensitive substring, longest keyword first; per-rule
+  `case_sensitive: true` / `exact: true` overrides. Validation fails closed on
+  ambiguous/chained rules (see `anonymize.example.yaml`).
+- **The rules file is a secret** — it contains the keywords being hidden. Same
+  handling as `env.cmd`: out of git (`anonymize.yaml` is gitignored), locked
+  ACL, never logged. The binary only ever reports rule *counts*.
+- An instance that must not mask anything uses a file with `rules: []` — a
+  deliberate, visible choice.
+
+Layout: the engine lives in `internal/anon` (shared — the upcoming
+`mcp-mssql-readonly` binary will use the same package), the PG wiring in
+`internal/pg`.
 
 ## Paths
 
 | Artifact | Path |
 |---|---|
-| Sources | `~/dev/mini-mcp/` |
+| Sources | `~/dev/mini-mcp/` (`cmd/mcp-pg-readonly/`, `internal/pg/`, `internal/anon/`) |
 | Binary | `~/bin/mcp-pg-readonly` (stable path — used as the MCP `command`) |
 | Wrapper | `~/bin/mcp-pg-readonly-run` (sources secrets → execs the binary) |
 | Secrets | `~/.config/mcp-pg-readonly/env` (chmod 600) |
-| Go module | `github.com/ilkoid/mcp-pg-readonly` |
+| Anonymization rules | `~/.config/mcp-pg-readonly/anonymize.yaml` (chmod 600 — SECRET) |
+| Go module | `mini-mcp` |
 
-> The folder is `mini-mcp`, but the module/binary name follows the design
+> The folder is `mini-mcp`; the binary name follows the design
 > doc's canon (`mcp-pg-readonly`) so the user-scope MCP `command` path is
 > stable across repo renames.
 
@@ -32,7 +78,7 @@ parsing is **not** the security boundary — it's only a DX precheck.
 
 ```bash
 cd ~/dev/mini-mcp
-go build -o ~/bin/mcp-pg-readonly .
+go build -o ~/bin/mcp-pg-readonly ./cmd/mcp-pg-readonly
 chmod +x mcp-pg-readonly-run.sh
 cp mcp-pg-readonly-run.sh ~/bin/mcp-pg-readonly-run
 
@@ -44,6 +90,10 @@ export PG_RO_PWD='...'
 export PG_ADMIN_PWD='...'   # only needed for role-bootstrap.sql, not at runtime
 EOF
 chmod 600 ~/.config/mcp-pg-readonly/env
+
+# anonymization rules (SECRET — fill with real keywords, template inside)
+cp anonymize.example.yaml ~/.config/mcp-pg-readonly/anonymize.yaml
+chmod 600 ~/.config/mcp-pg-readonly/anonymize.yaml
 ```
 
 `PG_RO_PWD` is **distinct** from `PG_PWD` (the admin/app password poncho-ai
@@ -75,9 +125,14 @@ Phase B (`analytical` / `recommendation` schemas) lives in
 ```bash
 ~/bin/mcp-pg-readonly --selftest --database wb_data_test
 ```
-Connects as `mcp_ro`, runs `SELECT 1`, then a write probe that **must fail**
-(verifies the boundary end-to-end). Prints to stderr; exits non-zero on failure.
-Never runs against prod implicitly — you choose the database via `--database`.
+Connects as `mcp_ro`, runs `SELECT 1` and the numeric probe, verifies the
+**client-side** precheck rejects a write statement (no write is ever sent to
+the server — the working databases are never written to, not even by
+"expected to fail" probes), checks the role holds no non-SELECT table grants
+via the read-only catalog, confirms the READ ONLY transaction mode, and
+reports the loaded anonymizer rule count. Prints to stderr; exits non-zero on
+failure. Never runs against prod implicitly — you choose the database via
+`--database`.
 
 ## Timeouts
 
@@ -85,7 +140,7 @@ A long query faces **three independent limits**; the tightest one wins:
 
 | Layer | Default | Set via |
 |---|---|---|
-| PG `statement_timeout` (DB cancels the query) | **2min** | `--statement-timeout` flag |
+| PG `statement_timeout` (DB cancels the query) | **2min** default; ARM prod entry: **10min** | `--statement-timeout` flag |
 | Whole-call ctx deadline in the binary | **3min** | `--query-timeout` flag (must exceed statement-timeout) |
 | ZCode client `timeoutMs` (client gives up on the tool call) | 30s (!) | `"timeoutMs"` in the server's config.json entry |
 
@@ -98,9 +153,10 @@ milliseconds (`set_config('statement_timeout', …)`): PG does not parse Go's
 
 ```jsonc
 // raise per server in ~/.zcode/cli/config.json if a shared instance is slower
+// (this is the LIVE prod posture since 2026-09-04; keep statement < query < timeoutMs)
 "args": ["--database", "wb_data_prod",
-         "--statement-timeout", "5m", "--query-timeout", "6m"],
-"timeoutMs": 400000
+         "--statement-timeout", "10m", "--query-timeout", "12m"],
+"timeoutMs": 800000
 ```
 
 Always set `"timeoutMs"` above `--query-timeout`, or the client aborts a call
@@ -110,7 +166,7 @@ and while one runs, that session's next tool call waits (pool `MaxConns=1`).
 For genuinely heavy reports, use `psql` under `mcp_ro` directly — MCP is built
 for the agent's iterative, bounded-result exploration, not batch analytics.
 
-Output caps (500 rows / 48KB, then ZCode's own result budget) are **not**
+Output caps (4000 rows / 48KB, then ZCode's own result budget) are **not**
 timeouts — a slow-but-successful query can still come back truncated. By design.
 
 ### Heavy read-only analytics — psql bypass
@@ -147,15 +203,15 @@ that's the provider config). Add two server entries for prod/test isolation:
       "pg-readonly": {
         "type": "stdio",
         "command": "/Users/ilkoid/bin/mcp-pg-readonly-run",
-        "args": ["--database", "wb_data_prod"],
-        "timeoutMs": 200000,
+        "args": ["--database", "wb_data_prod", "--statement-timeout", "10m", "--query-timeout", "12m"],
+        "timeoutMs": 800000,
         "env": { "PGHOST": "192.168.10.7", "PGPORT": "15432" }
       },
       "pg-readonly-test": {
         "type": "stdio",
         "command": "/Users/ilkoid/bin/mcp-pg-readonly-run",
-        "args": ["--database", "wb_data_test"],
-        "timeoutMs": 200000,
+        "args": ["--database", "wb_data_test", "--statement-timeout", "4m", "--query-timeout", "6m"],
+        "timeoutMs": 400000,
         "env": { "PGHOST": "192.168.10.7", "PGPORT": "15432" }
       }
     }
@@ -199,15 +255,15 @@ server — each entry differs only by `PGHOST` / `PGPORT` / `PGSSLMODE` /
       "pg-prod": {
         "type": "stdio",
         "command": "/Users/ilkoid/bin/mcp-pg-readonly-run",
-        "args": ["--database", "wb_data_prod"],
-        "timeoutMs": 200000,
+        "args": ["--database", "wb_data_prod", "--statement-timeout", "10m", "--query-timeout", "12m"],
+        "timeoutMs": 800000,
         "env": { "PGHOST": "192.168.10.7", "PGPORT": "15432" }
       },
       "pg-vps2": {
         "type": "stdio",
         "command": "/Users/ilkoid/bin/mcp-pg-readonly-run",
-        "args": ["--database", "main"],
-        "timeoutMs": 200000,
+        "args": ["--database", "main", "--statement-timeout", "4m", "--query-timeout", "6m"],
+        "timeoutMs": 400000,
         "env": {
           "PGHOST": "vps2.example.com", "PGPORT": "5432",
           "PGSSLMODE": "require"
@@ -241,8 +297,9 @@ in `PG_USER_PWD`. No bootstrap needed; point the entry at that role:
   "type": "stdio",
   "command": "/Users/ilkoid/bin/mcp-pg-readonly-run",   // .cmd on Windows
   "args": ["--database", "wb_data_prod",
-           "--user", "arm_ai_ro", "--password-env", "PG_USER_PWD"],
-  "timeoutMs": 200000,
+           "--user", "arm_ai_ro", "--password-env", "PG_USER_PWD",
+           "--statement-timeout", "10m", "--query-timeout", "12m"],
+  "timeoutMs": 800000,
   "env": { "PGHOST": "10.120.24.155", "PGPORT": "5432" }
 }
 ```
@@ -264,6 +321,47 @@ WHERE grantee = current_user AND privilege_type <> 'SELECT';
 > whose path can be overridden per server via `MCP_PG_SECRETS` (see
 > `mcp-pg-readonly-run.sh`). Drop one file per host under
 > `~/.config/mcp-pg-readonly/env.d/<name>` and point each server's `env` at it.
+
+## MSSQL (DWH, Windows VPS)
+
+The SQL Server sibling. Same anonymization rules file as PG (the deployment
+points both `--anon-config` at `E:\ARM_AI\.config\mcp-pg-readonly\anonymize.yaml`),
+same envelope/caps/notice behavior.
+
+```cmd
+go build -o %PUBLIC%\bin\mcp-mssql-readonly.exe .\cmd\mcp-mssql-readonly
+copy /Y mcp-mssql-readonly-run.cmd %PUBLIC%\bin\mcp-mssql-readonly-run.cmd
+%PUBLIC%\bin\mcp-mssql-readonly.exe --selftest --database DWH_MART ^
+  --anon-config E:\ARM_AI\.config\mcp-pg-readonly\anonymize.yaml
+```
+
+Secrets: `E:\ARM_AI\.config\mcp-mssql-readonly\env.cmd` with
+`set MSSQL_AI_PWD=<...>` (cmd syntax, no quotes; ACL-locked like the PG
+`env.cmd`; the repo ships only the template with a placeholder). Endpoint
+defaults: `MSSQL_HOST=10.120.11.233`, `MSSQL_PORT=1433` (overridable via env
+or the ZCode `env` block). TDS encryption via `--encrypt`
+(`disable|false|true|strict`, default `disable`).
+
+Role: `ai_reader` (already exists, SELECT-only — see
+`role-bootstrap-mssql.sql` for the verification queries; SQL Server has no
+READ ONLY transaction, so the role grants ARE the write boundary and
+`--selftest` checks them via `sys.database_permissions` + `IS_ROLEMEMBER`).
+
+ZCode entries in `~/.zcode/cli/config.json` (same command wrapper, role,
+secrets and shared anonymize.yaml; `--statement-timeout 4m --query-timeout 6m` + `timeoutMs: 400000`):
+
+- `mssql-readonly` — args `--database DWH_MART …`;
+- `mssql-readonly-bi` — args `--database bi_playtoday …` (the WB/Ozon/
+  LAMODA/mpstats BI base; the NAME contains a rule keyword, so it displays
+  masked in tool output — queries by the masked name are translated back
+  transparently).
+
+Dialect notes (vs PG): values bind as `@p1,@p2`; BIGINT/DECIMAL/MONEY arrive
+as JSON strings (DECIMAL travels exactly — the driver hands it over as
+text); full-literal alias filters expand to `IN (N'…', …)` covering both
+data eras; `N'…'` literals are understood; blocked leak functions are the
+T-SQL set (LEFT/RIGHT/SUBSTRING/STUFF/REPLACE/HASHBYTES/COMPRESS/LEN/
+DATALENGTH/CHARINDEX/…) plus CAST/CONVERT-to-VARBINARY.
 
 ## Windows (VPS)
 
@@ -299,7 +397,7 @@ need the `.go` files, `go.mod`, `role-bootstrap.sql`, and
 ```cmd
 cd %USERPROFILE%\dev\mini-mcp
 mkdir %USERPROFILE%\bin 2>nul
-go build -o %USERPROFILE%\bin\mcp-pg-readonly.exe .
+go build -o %USERPROFILE%\bin\mcp-pg-readonly.exe .\cmd\mcp-pg-readonly
 copy mcp-pg-readonly-run.cmd %USERPROFILE%\bin\mcp-pg-readonly-run.cmd
 ```
 
@@ -325,6 +423,12 @@ Set-Content -Path $path -Value $content -Encoding ASCII
 # chmod 600 equivalent: strip inherited ACLs, leave only the current user.
 icacls.exe $path /inheritance:r /grant:r "$($env:USERNAME):(R,W)"
 Get-Content $path
+
+# anonymization rules — SAME secret handling (the file contains the keywords
+# being hidden). Template: anonymize.example.yaml in the repo.
+Copy-Item .\anonymize.example.yaml "$dir\anonymize.yaml"
+notepad "$dir\anonymize.yaml"    # fill in the real keywords
+icacls.exe "$dir\anonymize.yaml" /inheritance:r /grant:r "$($env:USERNAME):(R,W)"
 ```
 
 > If ZCode runs as a **different user** than your RDP session, replace
@@ -360,8 +464,8 @@ keep `command` as a **string** (not an array):
       "pg-readonly": {
         "type": "stdio",
         "command": "C:/Users/YOUR_USER/bin/mcp-pg-readonly-run.cmd",
-        "args": ["--database", "wb_data_prod"],
-        "timeoutMs": 200000,
+        "args": ["--database", "wb_data_prod", "--statement-timeout", "10m", "--query-timeout", "12m"],
+        "timeoutMs": 800000,
         "env": { "PGHOST": "192.168.10.7", "PGPORT": "15432" }
       }
     }
