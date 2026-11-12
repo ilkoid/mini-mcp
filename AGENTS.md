@@ -240,6 +240,29 @@ C:/Users/Public/bin/mcp-websearch.exe --selftest               # websearch live 
 - `PG_RO_PWD` (this server) is **distinct** from `PG_PWD` (admin/app
   downloaders in poncho-ai). Don't reuse them.
 
+## Collaborator workflow — branch + review (rule, adopted 2026-11-12)
+
+Two machines share this repo (macOS + Windows VPS). Feature work by one
+collaborator is reviewed by the other BEFORE it lands on `main`:
+
+1. **Feature → `feature/<name>` branch → push → PR to `main`.** A PR is
+   just the branch push plus a review record — inline comments stick to
+   lines and the merge is logged as reviewed. Plain branch push without a
+   PR is acceptable too (review happens locally) — what is NOT acceptable
+   is pushing unreviewed feature commits straight to `main`.
+2. **Reviewer's checklist** (both sides use the same one): build + vet +
+   tests green (add `GOOS=windows` when anything platform-specific is
+   touched; the darwin side runs the macOS build); staged-diff secret scan
+   (`git diff --cached | grep -iE 'password|pwd|passwd|secret|token'` —
+   placeholders/paths only); for mcp-websearch: stdout stays sacred (MCP
+   frames only), bridge code stays sequential (single listener goroutine);
+   docs updated in the same PR when behavior changes.
+3. **Small stuff may go straight to `main`** after self-check: docs,
+   typo-level fixes, test fixtures, README notes. If in doubt — branch.
+4. **Force-push: only to your own feature branches.** `main` history
+   rewrites require explicit coordination with the other side (the one
+   past incident is why — see Secrets hygiene below).
+
 ## ZCode registration (for reference)
 
 Servers are registered in **`~/.zcode/cli/config.json`** (NOT
