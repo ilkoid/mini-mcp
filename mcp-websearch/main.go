@@ -55,6 +55,8 @@ func main() {
 		selftestBridge = flag.Bool("selftest-bridge", false, "run a live level-4 bridge check (needs the extension loaded in a real browser), then exit")
 		profileFetch   = flag.String("profile-fetch", "", "one-shot level-4 fetch: run ONE profile_fetch job for this URL, print the envelope to stderr, exit")
 		profileTab     = flag.String("profile-tab", "", "one-shot level-4 tab read: run ONE profile_tab job for this URL, print the envelope to stderr, exit")
+		pageFetch      = flag.String("page-fetch", "", "one-shot level-4 page-context fetch: load --origin in the real browser, fetch this URL as that page (APIs behind Origin checks)")
+		originFlag     = flag.String("origin", "", "with --page-fetch: page origin the fetch runs from")
 		oneShotRaw     = flag.Bool("raw", false, "with --profile-fetch: raw HTML instead of extracted text")
 		oneShotWaitMs  = flag.Int("wait-ms", 3000, "with --profile-tab: settle time after load, ms (capped at 15000)")
 		timeout        = flag.Duration("timeout", defaultHTTPTimeout, "per-request HTTP timeout (default: 20s)")
@@ -82,6 +84,9 @@ func main() {
 	}
 	if *profileTab != "" {
 		os.Exit(runOneShotBridge(&Job{ID: newJobID(), Action: actionTabRead, URL: *profileTab, WaitMs: *oneShotWaitMs}))
+	}
+	if *pageFetch != "" {
+		os.Exit(runOneShotBridge(&Job{ID: newJobID(), Action: actionPageFetch, URL: *pageFetch, Origin: *originFlag}))
 	}
 
 	// Serve MCP over stdio. From here on, NOTHING may write to stdout except
@@ -204,9 +209,12 @@ func runOneShotBridge(j *Job) int {
 		return 1
 	}
 	var out any
-	if j.Action == actionFetch {
+	switch j.Action {
+	case actionFetch:
 		out = shapeProfileFetch(res, j.Raw)
-	} else {
+	case actionPageFetch:
+		out = shapeProfileFetch(res, true) // API bodies are JSON — no HTML extraction
+	default:
 		out = shapeProfileTab(res)
 	}
 	b, err := json.MarshalIndent(out, "", "  ")

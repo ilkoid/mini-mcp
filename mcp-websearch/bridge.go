@@ -37,17 +37,22 @@ import (
 
 // Bridge actions. fetch = plain network request from the browser profile
 // (cookies + real fingerprint, no rendering); tab_read = navigate a visible
-// pinned tab, let JS run like a user's, then scrape title/url/innerText.
+// pinned tab, let JS run like a user's, then scrape title/url/innerText;
+// page_fetch = run the fetch INSIDE a page loaded from Origin (content-script
+// context) — for APIs behind Origin/Referer checks (the WB search API 403s a
+// bare service-worker fetch but passes the page's own XHR).
 const (
-	actionFetch   = "fetch"
-	actionTabRead = "tab_read"
+	actionFetch     = "fetch"
+	actionTabRead   = "tab_read"
+	actionPageFetch = "page_fetch"
 )
 
 // Job is a unit of work for the extension. Carried as-is in GET /job.
 type Job struct {
 	ID     string `json:"id"`
-	Action string `json:"action"` // "fetch" | "tab_read"
+	Action string `json:"action"` // "fetch" | "tab_read" | "page_fetch"
 	URL    string `json:"url"`
+	Origin string `json:"origin,omitempty"`  // page_fetch: page whose context runs the fetch
 	Raw    bool   `json:"raw,omitempty"`     // fetch: skip text extraction
 	WaitMs int    `json:"wait_ms,omitempty"` // tab_read: settle time after load
 }
@@ -64,7 +69,16 @@ type Result struct {
 	FinalURL string `json:"final_url,omitempty"` // fetch: after redirects; tab_read: location.href
 	Title    string `json:"title,omitempty"`     // tab_read: document.title
 	Body     string `json:"body,omitempty"`      // fetch: HTML; tab_read: innerText
+	Links    []Link `json:"links,omitempty"`     // tab_read: anchors (href+text) — SERP cards are often <a> themselves
 	Err      string `json:"err,omitempty"`
+}
+
+// Link is one anchor from a tab_read page: the href carries ids (WB nmID,
+// Ozon SKU) and the text is the card content (brand+name+price) when the
+// card itself is the anchor.
+type Link struct {
+	Href string `json:"href"`
+	Text string `json:"text,omitempty"`
 }
 
 // mailbox is the ONLY shared structure of the bridge: one job slot, one
@@ -367,7 +381,11 @@ func (b *bridge) ownerDispatch(j *Job) (*Result, error) {
 		time.Sleep(250 * time.Millisecond)
 		if r := b.mb.takeResult(j.ID); r != nil {
 			if !r.OK {
-				return nil, fmt.Errorf("extension: %s", r.Err)
+				msg := r.Err
+				if msg == "" && r.Body != "" { // extension put the reason in Body
+					msg = r.Body
+				}
+				return nil, fmt.Errorf("extension: %s", msg)
 			}
 			return r, nil
 		}
@@ -411,9 +429,10 @@ func (b *bridge) clientDispatch(j *Job) (*Result, error) {
 	}
 	payload, err := json.Marshal(struct {
 		URL    string `json:"url"`
+		Origin string `json:"origin"`
 		Raw    bool   `json:"raw"`
 		WaitMs int    `json:"wait_ms"`
-	}{URL: j.URL, Raw: j.Raw, WaitMs: j.WaitMs})
+	}{URL: j.URL, Origin: j.Origin, Raw: j.Raw, WaitMs: j.WaitMs})
 	if err != nil {
 		return nil, err
 	}
@@ -615,6 +634,7 @@ func (b *bridge) apiDispatch(action string) http.HandlerFunc {
 		}
 		var req struct {
 			URL    string `json:"url"`
+			Origin string `json:"origin"`
 			Raw    bool   `json:"raw"`
 			WaitMs int    `json:"wait_ms"`
 		}
@@ -626,7 +646,7 @@ func (b *bridge) apiDispatch(action string) http.HandlerFunc {
 			http.Error(w, "url is required", http.StatusBadRequest)
 			return
 		}
-		j := &Job{ID: newJobID(), Action: action, URL: req.URL, Raw: req.Raw, WaitMs: req.WaitMs}
+		j := &Job{ID: newJobID(), Action: action, URL: req.URL, Origin: req.Origin, Raw: req.Raw, WaitMs: req.WaitMs}
 		res, err := b.ownerDispatch(j)
 		var busy *busyError
 		if errors.As(err, &busy) {

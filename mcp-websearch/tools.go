@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -167,12 +168,15 @@ type profileFetchOutput struct {
 	Text      string `json:"text"`
 }
 
-// profileTabOutput is the profile_tab envelope.
+// profileTabOutput is the profile_tab envelope. Links come BEFORE Text:
+// metadata-first ordering keeps them readable when the client chops the
+// tail of an oversized result (same discipline as the DB envelope).
 type profileTabOutput struct {
 	FinalURL  string `json:"final_url"`
 	Title     string `json:"title,omitempty"`
 	Truncated bool   `json:"truncated"`
 	Notice    string `json:"notice,omitempty"`
+	Links     []Link `json:"links,omitempty"`
 	Text      string `json:"text"`
 }
 
@@ -197,10 +201,28 @@ func shapeProfileFetch(res *Result, raw bool) *profileFetchOutput {
 }
 
 // shapeProfileTab turns a tab_read Result into the tool payload (innerText
-// is already text; just cap it).
+// is already text; just cap it). Links pass through capped (extension sends
+// ≤300; each text already ≤160 chars); with links present the text gets a
+// tighter cap so the whole envelope stays under the client's budget.
 func shapeProfileTab(res *Result) *profileTabOutput {
-	out := &profileTabOutput{FinalURL: res.FinalURL, Title: res.Title}
-	out.Text, out.Truncated = capText(strings.TrimSpace(res.Body))
+	out := &profileTabOutput{FinalURL: res.FinalURL, Title: res.Title, Links: res.Links}
+	if len(out.Links) > 150 {
+		out.Links = out.Links[:150]
+		out.Notice = "links capped at 150"
+	}
+	textCap := maxTextBytes
+	if len(out.Links) > 0 {
+		textCap = 16 << 10 // 16KB when links ride along — envelope budget
+	}
+	out.Text = strings.TrimSpace(res.Body)
+	if len(out.Text) > textCap {
+		cut := textCap
+		for cut > 0 && !utf8.RuneStart(out.Text[cut]) {
+			cut--
+		}
+		out.Text = out.Text[:cut]
+		out.Truncated = true
+	}
 	return out
 }
 

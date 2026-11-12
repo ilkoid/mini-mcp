@@ -102,25 +102,32 @@ async function ensureTab() {
   return tab.id;
 }
 
-function waitForLoad(tabId, timeoutMs) {
-  return new Promise((resolve) => {
-    const done = (status) => {
-      clearTimeout(timer);
-      chrome.tabs.onUpdated.removeListener(listener);
-      resolve(status);
-    };
-    const timer = setTimeout(() => done("timeout"), timeoutMs);
-    const listener = (id, info) => {
-      if (id === tabId && info.status === "complete") done("complete");
-    };
-    chrome.tabs.onUpdated.addListener(listener);
-    chrome.tabs
-      .get(tabId)
-      .then((t) => {
-        if (t.status === "complete") done("complete");
-      })
-      .catch(() => done("gone"));
-  });
+// waitOrigin ждёт, пока вкладка ОКАЖЕТСЯ на ожидаемом origin и догрузится.
+// Надёжнее события onUpdated: мгновенная проверка «status=complete» ловит
+// СТАРУЮ страницу до старта навигации (гонка, из-за которой fetch уходил
+// не с того origin и падал по CORS).
+async function waitOrigin(tabId, originPrefix, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const t = await chrome.tabs.get(tabId);
+      if ((!originPrefix || (t.url || "").startsWith(originPrefix)) && t.status === "complete") {
+        return true;
+      }
+    } catch {
+      return false; // вкладка умерла
+    }
+    await sleep(150);
+  }
+  return false; // таймаут — но страницу всё равно попробуем прочитать
+}
+
+function urlPrefix(u) {
+  try {
+    return new URL(u).origin + "/";
+  } catch {
+    return ""; // не URL (about:blank и т.п.) — ждать только complete
+  }
 }
 
 async function doTabRead(job) {
@@ -128,24 +135,90 @@ async function doTabRead(job) {
   try {
     tabId = await ensureTab();
     await chrome.tabs.update(tabId, { active: true, url: job.url });
-    await waitForLoad(tabId, TAB_LOAD_TIMEOUT_MS);
+    await waitOrigin(tabId, urlPrefix(job.url), TAB_LOAD_TIMEOUT_MS);
     const wait = Math.min(Math.max(job.wait_ms || 3000, 0), TAB_WAIT_MAX_MS);
     if (wait > 0) await sleep(wait); // даём JS/челленджам успокоиться
     // executeScript, а не evaluate: страница читается в её контексте;
     // синтетические события тут не шлём — только чтение
     const [res] = await chrome.scripting.executeScript({
       target: { tabId },
-      func: () => ({
-        title: document.title,
-        url: location.href,
-        text: ((document.body && document.body.innerText) || "").slice(0, 512 * 1024),
-      }),
+      func: () => {
+        // Ссылки — первый класс результата: на SERP карточка товара часто
+        // САМА <a> (WB, Ozon), её innerText = бренд+название+цена, а href
+        // несёт id (nmID/SKU). Универсальнее любых API (им не страшны
+        // смены версий), кап 300 + дедуп по href.
+        const links = [];
+        const seen = new Set();
+        for (const a of document.querySelectorAll("a[href]")) {
+          const href = a.href;
+          if (!href || seen.has(href)) continue;
+          seen.add(href);
+          links.push({ href, text: (a.innerText || "").replace(/\s+/g, " ").trim().slice(0, 160) });
+          if (links.length >= 300) break;
+        }
+        return {
+          title: document.title,
+          url: location.href,
+          text: ((document.body && document.body.innerText) || "").slice(0, 512 * 1024),
+          links,
+        };
+      },
     });
     await postResult(job.id, {
       ok: true,
       final_url: res.result.url,
       title: res.result.title,
       body: res.result.text,
+      links: res.result.links,
+    });
+  } catch (e) {
+    await postResult(job.id, { ok: false, err: String((e && e.message) || e) });
+  }
+}
+
+// --- action: page_fetch — fetch В КОНТЕКСТЕ страницы Origin ---
+// Для API за проверкой Origin/Referer (например search.wb.ru: SW-fetch
+// без Origin → 403, XHR самой страницы проходит). Навигация в закреплённую
+// вкладку на Origin, затем executeScript с async-func: её fetch несёт
+// Origin страницы + куки — ровно как собственный XHR сайта.
+
+async function doPageFetch(job) {
+  let tabId;
+  try {
+    tabId = await ensureTab();
+    await chrome.tabs.update(tabId, { active: true, url: job.origin || job.url });
+    const prefix = urlPrefix(job.origin || job.url);
+    await waitOrigin(tabId, prefix, TAB_LOAD_TIMEOUT_MS);
+    const [res] = await chrome.scripting.executeScript({
+      target: { tabId },
+      // try/catch обязателен: отказ async-func проглатывается и результат
+      // приходит null (именно так проявился CORS-отказ не с того origin)
+      func: async (u) => {
+        try {
+          for (let i = 0; i < 100 && document.readyState !== "complete"; i++) {
+            await new Promise((r) => setTimeout(r, 100));
+          }
+          const r = await fetch(u, { credentials: "include" });
+          const t = await r.text();
+          return { status: r.status, url: r.url, text: t.slice(0, 512 * 1024), err: "" };
+        } catch (e) {
+          return { status: 0, url: location.href, text: "", err: String((e && e.message) || e) };
+        }
+      },
+      args: [job.url],
+    });
+    const v = res && res.result;
+    if (!v) {
+      await postResult(job.id, { ok: false, err: "injected fetch returned null" });
+      return;
+    }
+    // ok=true = получили HTTP-ответ (как в doFetch); статус решает вызывающий
+    await postResult(job.id, {
+      ok: v.status > 0 && v.status < 500,
+      status: v.status,
+      final_url: v.url,
+      body: v.text,
+      err: v.status > 0 ? "" : `${v.err || "page fetch failed"} @ ${v.url}`,
     });
   } catch (e) {
     await postResult(job.id, { ok: false, err: String((e && e.message) || e) });
@@ -165,6 +238,7 @@ async function pollLoop(myToken) {
         log(`job ${job.id} ${job.action} ${job.url}`);
         if (job.action === "fetch") await doFetch(job);
         else if (job.action === "tab_read") await doTabRead(job);
+        else if (job.action === "page_fetch") await doPageFetch(job);
         else await postResult(job.id, { ok: false, err: "unknown action " + job.action });
         // после задания — СРАЗУ новый опрос: темп держит сервер (min-interval)
       } else if (resp.status === 401) {
