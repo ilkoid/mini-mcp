@@ -86,7 +86,10 @@ C:/Users/Public/bin/mcp-websearch.exe --selftest               # websearch live 
 | `.gitattributes` | CRLF hygiene: `*.cmd`/`*.bat` forced to CRLF (cmd breaks on LF), everything else LF, `*.exe` binary. |
 | `*_test.go` | Unit (`ro_test.go`, `tools_test.go`, `guards_test.go`, `guards_pg_test.go`, mssql `precheck_test.go`/`encode_test.go`) + integration (`ro_integration_test.go` ← `PG_TEST_DSN`; mssql `ro_integration_test.go` ← `MSSQL_TEST_DSN`). |
 | `DEPLOY-WINDOWS.md` | Full from-scratch Windows VPS deploy guide (Russian): prerequisites, network to the PG host, secrets/ACL, role bootstrap, ZCode registration, git/secrets rules, troubleshooting, checklist. Keep in sync with the README "Windows (VPS)" quick section when behavior changes. |
-| `mcp-websearch/` | Second module (`github.com/ilkoid/mcp-websearch`, own go.mod): quota-free local web search / page reader. Tools `web_search` (plain-HTTP DDG/Bing scrape, auto-fallback) + `read_url` (readable-text extraction, 48KB cap, charset-aware). Platform-neutral Go (net/http + goquery) — no CDP/browser engine anywhere; the "Mac" trace is only the spoofed desktop UA. Registered as entry `websearch` in ZCode on BOTH machines: Mac (`~/bin/mcp-websearch`, `~/.zcode/cli/config.json`) and Windows VPS (exe `C:\Users\Public\bin\mcp-websearch.exe`, `C:\Users\wsl\.zcode\cli\config.json`, `timeoutMs: 60000` — worst case auto mode is ddg-timeout 20s + bing 20s ≈ 40s, client default 30s would cut the fallback; live-verified 2026-11-12: DDG answers from this IP, selftest PASS). No wrapper needed (no secrets, reads no env). AutoClaw registration (`~/.openclaw-autoclaw/openclaw.json`) is Mac-side only. Steering rules: `~/.zcode/AGENTS.md` on both machines (quota rule + 4-level escalation ladder web_search → read_url → built-in browser IAB → Browser MCP); full methodology lives OUTSIDE the repo at `E:\ARM_AI\docs\WEB-PARSING-GUIDE.md` (Mac-side original, 2026-10-18). If DDG/Bing ever bot-wall this IP, the documented escalation is the interactive browser, not scraping tricks. |
+| `mcp-websearch/` | Second module (`github.com/ilkoid/mcp-websearch`, own go.mod): quota-free local web search / page reader + level-4 real-browser bridge. Tools: `web_search` (plain-HTTP DDG/Bing scrape, auto-fallback), `read_url` (readable-text extraction, 48KB cap, charset-aware), `bridge_status` / `profile_fetch` / `profile_tab` (level 4 — see the bridge section below). Registered in BOTH ZCode (`~/.zcode/cli/config.json`) and AutoClaw (`~/.openclaw-autoclaw/openclaw.json`) so neither agent burns the hosted web-search/web-reader quota; steering rules live in `~/.zcode/AGENTS.md` and the auto-coder workspace AGENTS.md. `--selftest` probes the live engines; `--selftest-bridge` (needs the extension loaded) and one-shot `--profile-fetch URL` / `--profile-tab URL` exercise level 4. Windows VPS registration (added 2026-11-12): entry `websearch`, exe `C:\Users\Public\bin\mcp-websearch.exe`, `timeoutMs: 60000` (auto-mode worst case ddg-timeout 20s + bing 20s ≈ 40s; client default 30s would cut the fallback), no wrapper (no secrets), steering file `C:\Users\wsl\.zcode\AGENTS.md`; live-verified same day (DDG answers, selftest PASS). AutoClaw registration is Mac-side only. |
+| `mcp-websearch/bridge.go` | Level-4 core: mailbox hub (ONE job slot + ONE result slot on one mutex — busy = immediate refusal, never a queue), lazy owner election on `127.0.0.1:8765` (first process binds = owner; siblings become /api clients; owner death → connection refused → re-election → takeover ~5s), `X-Bridge-Token` auth (shared file `~/.config/mcp-browserbridge/token`, 0600, auto-created; 401 without it — also closes DNS-rebinding via a loopback-Host check), server-enforced pacing `--min-interval` (2s default, gateIssue debt is paid by real sleep so bursts can't pile up a wait). Sequential by design: the ONLY goroutine the module ever starts is the owner's HTTP listener. |
+| `mcp-websearch/extension/` | The MV3 browser extension (vanilla JS, no build step): `background.js` short-polls `GET /job` ~1/s (the poll doubles as the MV3 keepalive; `chrome.alarms` 30s is the fallback), executes `fetch` (profile cookies + fingerprint, charset sniff, 5MB cap) and `tab_read` (one reused pinned visible tab → title/url/innerText via `chrome.scripting`); `options.html/js` holds the token. Install/load steps + port caveat live in `extension/README.md`. |
+| `WEB-PARSING-GUIDE.md` | Handoff guide (Russian): the full tool ladder (websearch MCP → read_url → IAB browser → own bridge level 4), mcp-websearch setup/registration for ZCode+AutoClaw, empirical applicability boundaries (incl. the 2026-11-12 result: **WB passes level 4 from a real profile** — bare fetch, one polite attempt max), and the battle-tested Ozon parsing methodology (one reused tab, 3s pacing, SKU-from-URL, webPrice/material selectors, anti-WAF etiquette). Written for the sibling parsing project; keep in sync with real selector drift. A pre-transfer copy also lives at `E:\ARM_AI\docs\WEB-PARSING-GUIDE.md` — the REPO copy is canonical. |
 
 ## Architecture rules that matter for edits
 
@@ -281,6 +284,38 @@ database` when the database matches `*_prod`: `pg-readonly` (prod) and
 by database name, so that text is the agent's only prod/test signal. The psql bypass is only as safe as the role's grants, so an
 existing-role entry presumes the role was verified SELECT-only
 (`role_table_grants` check, see README / DEPLOY-WINDOWS.md variant Б).
+
+## mcp-websearch: level-4 bridge (real browser)
+
+The bridge passes WB-class anti-bot walls by running requests inside the
+user's REAL browser profile (Edge on macOS / clean Chrome on the Windows
+VPS) via the extension. Verified 2026-11-12: WB main page returns HTTP 200
+to a **bare fetch** from the profile; Ozon main too (its `__rr` challenge
+resolves on profile cookies); Ozon SERP needs `profile_tab` (JS render);
+Google/ya.ru searches pass with no captcha; playtoday.ru works both ways.
+
+Rules for editing bridge code:
+
+1. **Sequential by design.** One mailbox, one job slot, one result slot; the
+   only goroutine is the owner's `http.Server` listener (`go srv.Serve`).
+   Waiting = 250ms short-poll on `takeResult(id)`; contention = immediate
+   `busyError` (never a queue, never a second goroutine).
+2. **Results match by job id** (`mailbox.takeResult`); a late answer to an
+   old job must never satisfy a new waiter, and a timed-out job frees the
+   slot (`dropJob`) so the bridge can't wedge busy.
+3. **Pacing is server-side and global** (`gateIssue`, `--min-interval` 2s):
+   the owner gates ALL jobs (own + every client's /api call), so several
+   agent processes cannot outrun human pace. The debt is paid with real
+   sleep — it never accumulates past one interval.
+4. **Token + loopback only.** Every endpoint requires `X-Bridge-Token`
+   (shared file, 0600) and a loopback Host header. The token is NEVER
+   committed; the extension gets it pasted via its options page.
+5. **Etiquette is policy, not config.** One polite attempt per hostile site
+   per session (WB: fetch → at most one tab → stop); never wait out
+   anti-bot timers; scale data comes from the official pipeline
+   (poncho-ai downloaders), not from this bridge. Plan-Б if the extension
+   route ever dies: chromedp on a dedicated profile (≈ IAB trust level —
+   i.e. probably NOT enough for WB; that's why it's plan-Б).
 
 ## Cross-platform (Unix ↔ Windows)
 

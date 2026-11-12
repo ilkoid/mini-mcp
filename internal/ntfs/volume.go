@@ -55,14 +55,8 @@ func OpenVolume(device string) (*Volume, error) {
 
 func (v *Volume) Close() error { return windows.CloseHandle(v.Handle) }
 
-// JournalInfo mirrors the leading fields of USN_JOURNAL_DATA_V0/V1 (they
-// share a prefix; extra V1/V2 fields are ignored).
-type JournalInfo struct {
-	Absent    bool
-	JournalID int64 // changes when the journal is recreated → full rescan (wrap)
-	FirstUSN  int64
-	NextUSN   int64
-}
+// JournalInfo lives in types.go (untagged): plain data used by the
+// cross-platform storage core.
 
 // QueryJournal reads the journal state. An absent journal is NOT an error —
 // the MFT snapshot stays valid; deltas just can't run until the journal is
@@ -138,16 +132,8 @@ func (v *Volume) EnumMFT(fn func(USNRecord) error) (int, error) {
 	}
 }
 
-// Snapshot is the Э-0.2 full-scan result. Journal is captured FIRST so the
-// delta stream (Э-0.3) can start exactly at NextUSN — changes during the
-// scan are then replayed on top instead of being lost (Э-0.3 rake).
-type Snapshot struct {
-	Journal JournalInfo
-	Entries map[int64]Entry // $-filtered, includes dirs and the root anchor
-	Paths   map[int64]string
-	Orphans map[int64]bool
-	Count   int // raw records seen (pre-filter)
-}
+// Snapshot (the struct) lives in types.go (untagged); only the syscall-side
+// scan method stays here.
 
 // Snapshot runs the full MFT pass and assembles paths.
 func (v *Volume) Snapshot() (*Snapshot, error) {

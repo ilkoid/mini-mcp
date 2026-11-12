@@ -1,0 +1,10 @@
+{
+  "manifest_version": 3,
+  "name": "mcp-websearch bridge",
+  "version": "0.2.0",
+  "description": "Уровень 4: исполняет задания fetch / tab_read от локального mcp-websearch в этом браузере (куки и отпечаток реального профиля).",
+  "permissions": ["tabs", "scripting", "storage", "alarms"],
+  "host_permissions": ["<all_urls>", "http://127.0.0.1:8765/*"],
+  "background": { "service_worker": "background.js" },
+  "options_page": "options.html"
+}

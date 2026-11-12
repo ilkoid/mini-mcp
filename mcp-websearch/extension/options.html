@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>Мост mcp-websearch</title>
+  <style>
+    body { font: 14px/1.5 system-ui, sans-serif; max-width: 560px; margin: 2rem auto; padding: 0 1rem; color: #222; }
+    h2 { margin-top: 0; }
+    label { display: block; margin: 1rem 0 .3rem; font-weight: 600; }
+    input { width: 100%; padding: .4rem .5rem; box-sizing: border-box; font: inherit; }
+    button { margin: 1.2rem .6rem 0 0; padding: .5rem 1.2rem; cursor: pointer; }
+    #msg { margin-top: 1rem; padding: .6rem .8rem; border-radius: 6px; white-space: pre-wrap; display: none; }
+    #msg.ok { display: block; background: #e6f6e6; }
+    #msg.err { display: block; background: #fde8e8; }
+    code { background: #f2f2f2; padding: 0 .3rem; border-radius: 3px; }
+    p.hint { color: #555; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <h2>Мост mcp-websearch (уровень 4)</h2>
+  <p class="hint">
+    Расширение опрашивает локальный мост (<code>mcp-websearch</code>) на
+    <code>127.0.0.1</code> и исполняет его задания в этом браузере.
+    Токен лежит в файле <code>~/.config/mcp-browserbridge/token</code>
+    (Windows: <code>%USERPROFILE%\.config\mcp-browserbridge\token</code>) —
+    он создаётся автоматически при первом запуске моста.
+  </p>
+  <label for="token">Токен</label>
+  <input id="token" type="password" autocomplete="off" spellcheck="false">
+  <label for="port">Порт моста</label>
+  <input id="port" type="number" min="1" max="65535" value="8765">
+  <p class="hint">Смена порта по умолчанию (8765) требует ещё и правки
+  <code>host_permissions</code> в manifest.json — см. README.</p>
+  <button id="save">Сохранить</button>
+  <button id="test">Проверить связь</button>
+  <div id="msg"></div>
+  <script src="options.js"></script>
+</body>
+</html>

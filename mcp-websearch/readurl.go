@@ -23,6 +23,20 @@ import (
 // overhead, so `truncated` stays readable even when the tail gets chopped).
 const maxTextBytes = 48 << 10
 
+// capText truncates to maxTextBytes on a rune boundary (slicing mid-rune
+// would emit invalid UTF-8) and reports whether it truncated. Shared by
+// read_url and the level-4 profile tools.
+func capText(s string) (string, bool) {
+	if len(s) <= maxTextBytes {
+		return s, false
+	}
+	cut := maxTextBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut], true
+}
+
 // ReadOutput is the read_url envelope. Metadata BEFORE text, same ordering
 // discipline as everywhere in this family of servers.
 type ReadOutput struct {
@@ -72,13 +86,8 @@ func readURL(ctx context.Context, rawURL string) (*ReadOutput, error) {
 	}
 
 	out.Text = strings.TrimSpace(out.Text)
-	if len(out.Text) > maxTextBytes {
-		// Cut on a rune boundary — slicing mid-rune would emit invalid UTF-8.
-		cut := maxTextBytes
-		for cut > 0 && !utf8.RuneStart(out.Text[cut]) {
-			cut--
-		}
-		out.Text = out.Text[:cut]
+	if t, truncated := capText(out.Text); truncated {
+		out.Text = t
 		out.Truncated = true
 	}
 	if len(notices) > 0 {
