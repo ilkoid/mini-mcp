@@ -64,11 +64,13 @@ func main() {
 		tokenFile      = flag.String("bridge-token-file", "", "level-4 bridge token file (default: ~/.config/mcp-browserbridge/token; created 0600 if missing)")
 		minInterval    = flag.Duration("min-interval", 2*time.Second, "server-enforced pause between bridge jobs (anti-WAF politeness)")
 		bridgeTimeout  = flag.Duration("bridge-timeout", 30*time.Second, "how long to wait for the extension to answer a job")
+		autoStart      = flag.Bool("auto-start-browser", false, "owner: launch the browser binary in this user session when the extension is offline (closes the 'user closed Chrome mid-session' gap; debounced 60s)")
+		browserCmd     = flag.String("browser-cmd", "", "explicit browser binary for --auto-start-browser (default: autodetect Chrome, then Edge)")
 	)
 	flag.Parse()
 	httpClient.Timeout = *timeout
 
-	if err := initBridge(*bridgePort, *tokenFile, *minInterval, *bridgeTimeout); err != nil {
+	if err := initBridge(*bridgePort, *tokenFile, *minInterval, *bridgeTimeout, *autoStart, *browserCmd); err != nil {
 		fmt.Fprintf(os.Stderr, "bridge init: %v\n", err)
 		os.Exit(1)
 	}
