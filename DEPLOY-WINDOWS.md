@@ -443,6 +443,64 @@ icacls E:\ARM_AI\.config\mcp-pg-readonly\anonymize.yaml /grant "ДОМЕН\Гр�
 - Анонимизация общая (один `anonymize.yaml` на всех) — единая политика
   маскирования; обновляется в одном месте.
 
+### 7.2. mcp-websearch v0.2.0: поиск/чтение + мост в реальный Chrome (уровни 1–4)
+
+Модуль приезжает с `git pull` (тот же репо, отдельный Go-модуль). Секретов
+не содержит: токен моста создаётся сам. Полный гайд по границам —
+`WEB-PARSING-GUIDE.md` (лестница уровней 1→4, этика, рецепты WB/Ozon).
+
+**Уровни 1–2 (`web_search`, `read_url`) — без браузера:**
+
+```bat
+cd mcp-websearch
+go build -o %USERPROFILE%\bin\mcp-websearch.exe .
+%USERPROFILE%\bin\mcp-websearch.exe --selftest
+```
+
+Регистрация (если ещё нет) — `%USERPROFILE%\.zcode\cli\config.json`, для
+командной установки — `E:\ARM_AI\.zcode\config.json` (§7.1):
+
+```jsonc
+"websearch": {
+  "type": "stdio",
+  "command": "C:/Users/ВАШ_ЮЗЕР/bin/mcp-websearch.exe",
+  "args": [],
+  "timeoutMs": 60000
+}
+```
+
+Никакого launcher/env — паролей у сервера нет. Нюанс VPS: DDG/Bing с
+**датацентр-IP** могут чаще отдавать 403 (на резиденциальном — чисто);
+штатная эскалация зашита в описании инструмента (уровень 3/4).
+
+**Уровень 4 (мост в реальный профиль Chrome) — разовая настройка ~3 мин:**
+
+1. Chrome → `chrome://extensions` → «Режим разработчика» →
+   **«Загрузить распакованное расширение»** →
+   `<клон-репо>\mcp-websearch\extension`.
+2. `%USERPROFILE%\bin\mcp-websearch.exe --selftest-bridge` → создаст токен
+   `%USERPROFILE%\.config\mcp-browserbridge\token`, ожидаемо `FAIL:
+   extension offline` — это норма на первом прогоне.
+3. Скопировать токен из файла → карточка расширения → «Параметры» →
+   поле «Токен» → «Сохранить» (порт 8765 не трогать).
+4. Повторить `--selftest-bridge` → ждём `PASS` (example.com через
+   реальный профиль).
+
+Правила эксплуатации моста:
+
+- **Chrome должен быть запущен** — расширение живёт в нём;
+  `bridge_status` → `extension: offline` при закрытом Chrome — норма.
+- `auth_failing` = токен не тот (перевставить в Параметрах);
+  свежий владелец моста = `offline` до ~5с (backoff расширения) — само.
+- Этика WB-класса: **одна вежливая попытка за сессию на машину**
+  (`profile_fetch` → максимум один `profile_tab` → интерстишл = СТОП,
+  таймеры не ждать). Чистый Chrome этой VPS WB пускает (проверено руками
+  2026-11-12); массовые данные — только конвейер poncho-ai.
+
+**weather.py** (погода на неделю, api.met.no, без ключей): нужен Python 3;
+`python weather.py москва` (город, `lat,lon`, `--json` для конвейера).
+Установочная копия на Mac — `~/bin/weather`.
+
 ## 8. Проверка работы агента
 
 В свежей сессии ZCode:
@@ -565,6 +623,8 @@ copy /Y mcp-pg-readonly-run.cmd %USERPROFILE%\bin\mcp-pg-readonly-run.cmd
 - [ ] (свой PG) role-bootstrap.sql по test → прод, с реальным владельцем таблиц
 - [ ] (вариант Б) grants-проверка `arm_ai_ro` пустая; selftest с `--user arm_ai_ro --password-env PG_USER_PWD` — PASS
 - [ ] Selftest PASS на test, затем на прод
+- [ ] mcp-websearch: `go build` → `--selftest` PASS; зарегистрирован `websearch` (timeoutMs 60000, раздел 7.2)
+- [ ] (нужен уровень 4) расширение загружено в Chrome, токен вставлен, `--selftest-bridge` PASS
 - [ ] config.json: `cli` (не v2), command-строка на `.cmd`, таймауты тремя слоями (раздел 7), отдельные имена prod/test
 - [ ] Полный рестарт ZCode → оба сервера зелёные, `toolCount: 3`
 - [ ] `SELECT round(100.0*1/3)::float8` → число; `generate_series(1,5000)` → truncated-notice
