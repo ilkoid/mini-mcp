@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -28,6 +29,46 @@ func newTestBridge(t *testing.T, addr, tokenFile string, minInterval, jobTimeout
 		jobTimeout:  jobTimeout,
 		httpCli:     &http.Client{Timeout: minInterval + jobTimeout + 5*time.Second},
 		probeCli:    &http.Client{Timeout: 2 * time.Second},
+	}
+}
+
+// TestDetectBrowserPath: explicit --browser-cmd passes through verbatim;
+// autodetect returns either "" (nothing installed — exotic box) or an
+// existing non-directory path. No launch happens here.
+func TestDetectBrowserPath(t *testing.T) {
+	if got := detectBrowserPath(t.TempDir() + "/explicit-browser"); !strings.HasSuffix(got, "explicit-browser") {
+		t.Fatalf("explicit passthrough: %q", got)
+	}
+	if got := detectBrowserPath(""); got != "" {
+		if fi, err := os.Stat(got); err != nil || fi.IsDir() {
+			t.Fatalf("autodetected %q does not exist", got)
+		}
+	}
+}
+
+// TestMaybeStartBrowserDisabledNoop: with auto-start OFF the call must not
+// even arm the debounce (no side effects, no logs, no browser).
+func TestMaybeStartBrowserDisabledNoop(t *testing.T) {
+	b := newTestBridge(t, "127.0.0.1:0", filepath.Join(t.TempDir(), "token"), time.Millisecond, 50*time.Millisecond)
+	b.role = bridgeOwner
+	b.maybeStartBrowser() // autoStart=false — must be a silent no-op
+	if !b.lastBrowserStart.IsZero() {
+		t.Fatal("disabled auto-start must not arm the debounce")
+	}
+}
+
+// TestMaybeStartBrowserDebounce: with auto-start ON but a start attempt
+// already made <60s ago, the second call is a no-op (the debounce holds even
+// while the extension stays offline).
+func TestMaybeStartBrowserDebounce(t *testing.T) {
+	b := newTestBridge(t, "127.0.0.1:0", filepath.Join(t.TempDir(), "token"), time.Millisecond, 50*time.Millisecond)
+	b.role = bridgeOwner
+	b.autoStart = true
+	b.browserCmd = "definitely-not-a-real-browser-binary"
+	b.lastBrowserStart = time.Now().Add(-10 * time.Second) // 10s ago — inside the 60s window
+	b.maybeStartBrowser()
+	if since := time.Since(b.lastBrowserStart); since > 15*time.Second {
+		t.Fatalf("debounce was reset despite a recent start attempt (since=%v)", since)
 	}
 }
 
@@ -157,7 +198,10 @@ func TestLoadOrCreateToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fi.Mode().Perm() != 0o600 {
+	// POSIX permission bits exist only on Unix — Windows maps everything to
+	// the profile's default DACL, so the 0600 assert is Unix-only (privacy on
+	// Windows comes from the file living under the user profile).
+	if runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
 		t.Fatalf("token mode = %v, want 0600", fi.Mode().Perm())
 	}
 	again, err := loadOrCreateToken(path)

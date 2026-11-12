@@ -28,6 +28,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -185,16 +186,20 @@ type bridge struct {
 	minInterval time.Duration // server-enforced pause between jobs (politeness)
 	jobTimeout  time.Duration // how long to wait for the extension
 
+	autoStart  bool   // --auto-start-browser: launch the browser when the extension is offline
+	browserCmd string // --browser-cmd: explicit browser binary (else autodetect Chrome/Edge)
+
 	role     bridgeRole
 	mb       *mailbox // owner only
 	srv      *http.Server
 	httpCli  *http.Client // /api calls (client role); timeout > owner's worst case
 	probeCli *http.Client // /health probes, short timeout
 
-	mu           sync.Mutex // guards lastIssue/lastPoll (roles are stdio-serial)
-	lastIssue    time.Time  // earliest permitted next-issue moment (throttle debt)
-	lastPoll     time.Time  // last authenticated /job or /result hit — liveness
-	lastAuthFail time.Time  // last token rejection — "polls but wrong token" state
+	mu               sync.Mutex // guards lastIssue/lastPoll (roles are stdio-serial)
+	lastIssue        time.Time  // earliest permitted next-issue moment (throttle debt)
+	lastPoll         time.Time  // last authenticated /job or /result hit — liveness
+	lastAuthFail     time.Time  // last token rejection — "polls but wrong token" state
+	lastBrowserStart time.Time  // debounce for the browser auto-start (≥60s apart)
 }
 
 // bridged is this process's bridge. Nil until initBridge runs (main).
@@ -202,7 +207,7 @@ var bridged *bridge
 
 // initBridge builds the singleton from flags. Port 0 (tests) means
 // "ephemeral": the real address is resolved after the owner binds.
-func initBridge(port int, tokenFile string, minInterval, jobTimeout time.Duration) error {
+func initBridge(port int, tokenFile string, minInterval, jobTimeout time.Duration, autoStart bool, browserCmd string) error {
 	if bridged != nil {
 		return nil
 	}
@@ -218,6 +223,8 @@ func initBridge(port int, tokenFile string, minInterval, jobTimeout time.Duratio
 		tokenFile:   tokenFile,
 		minInterval: minInterval,
 		jobTimeout:  jobTimeout,
+		autoStart:   autoStart,
+		browserCmd:  browserCmd,
 		httpCli:     &http.Client{Timeout: minInterval + jobTimeout + 5*time.Second},
 		probeCli:    &http.Client{Timeout: 2 * time.Second},
 	}
@@ -368,6 +375,84 @@ func (b *bridge) retryInMs() int {
 	return ms
 }
 
+// browserCandidates lists well-known real-browser binaries (Chrome first,
+// Edge fallback) per OS. The bridge lives INSIDE the user's daily browser —
+// these are the only executors its cookies make trustworthy.
+func browserCandidates() []string {
+	var out []string
+	if p := os.Getenv("ProgramFiles"); p != "" {
+		out = append(out,
+			filepath.Join(p, "Google", "Chrome", "Application", "chrome.exe"),
+			filepath.Join(p, "Microsoft", "Edge", "Application", "msedge.exe"))
+	}
+	if p := os.Getenv("ProgramFiles(x86)"); p != "" {
+		out = append(out,
+			filepath.Join(p, "Google", "Chrome", "Application", "chrome.exe"),
+			filepath.Join(p, "Microsoft", "Edge", "Application", "msedge.exe"))
+	}
+	if p := os.Getenv("LocalAppData"); p != "" {
+		out = append(out, filepath.Join(p, "Google", "Chrome", "Application", "chrome.exe"))
+	}
+	out = append(out,
+		"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+		"/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+		"/usr/bin/google-chrome",
+		"/usr/bin/chromium-browser",
+	)
+	return out
+}
+
+// detectBrowserPath returns the explicit --browser-cmd when set, else the
+// first candidate that exists. Empty string = nothing found.
+func detectBrowserPath(explicit string) string {
+	if explicit != "" {
+		return explicit
+	}
+	for _, p := range browserCandidates() {
+		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+			return p
+		}
+	}
+	return ""
+}
+
+// maybeStartBrowser closes the "user closed the browser mid-session" gap
+// (RDP reality: the extension is dead until Chrome lives again). OWNER only,
+// best-effort, debounced to ≥60s between attempts: if no authenticated poll
+// arrived in the last 5s (extension offline) and auto-start is armed, launch
+// the browser binary in THIS user session — the dispatch that triggered it
+// keeps waiting its normal jobTimeout, which comfortably covers a cold
+// Chrome start + service-worker boot (~3-10s). The reaper goroutine touches
+// no bridge state, so the "one listener goroutine" discipline still holds.
+func (b *bridge) maybeStartBrowser() {
+	if !b.autoStart || b.role != bridgeOwner {
+		return
+	}
+	b.mu.Lock()
+	last := b.lastPoll
+	if !b.lastBrowserStart.IsZero() && time.Since(b.lastBrowserStart) < 60*time.Second {
+		b.mu.Unlock()
+		return
+	}
+	b.lastBrowserStart = time.Now()
+	b.mu.Unlock()
+	if !last.IsZero() && time.Since(last) < 5*time.Second {
+		return // extension is polling — nothing to start
+	}
+	path := detectBrowserPath(b.browserCmd)
+	if path == "" {
+		log.Printf("bridge: extension offline and no browser binary found (set --browser-cmd)")
+		return
+	}
+	cmd := exec.Command(path)
+	if err := cmd.Start(); err != nil {
+		log.Printf("bridge: browser auto-start failed: %v", err)
+		return
+	}
+	go func() { _ = cmd.Wait() }() // process reaper — no shared state, runs once per launch
+	log.Printf("bridge: extension offline — started %s", path)
+}
+
 // ownerDispatch is the owner's direct path into the mailbox (no HTTP hop to
 // itself): gate (politeness) → claim slot (busy = immediate refusal) →
 // short-poll for OUR result id until jobTimeout.
@@ -402,6 +487,7 @@ func (b *bridge) dispatch(j *Job) (*Result, error) {
 		return nil, err
 	}
 	if b.role == bridgeOwner {
+		b.maybeStartBrowser() // best-effort; no-op when the extension is alive
 		return b.ownerDispatch(j)
 	}
 	res, err := b.clientDispatch(j)
@@ -491,6 +577,7 @@ func (b *bridge) statusInfo() map[string]any {
 		"token_file":      b.tokenFile,
 		"min_interval_ms": b.minInterval.Milliseconds(),
 		"job_timeout_ms":  b.jobTimeout.Milliseconds(),
+		"auto_start":      b.autoStart,
 	}
 	if err := b.ensure(); err != nil {
 		info["error"] = err.Error()
