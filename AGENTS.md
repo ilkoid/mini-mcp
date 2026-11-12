@@ -42,6 +42,9 @@ MSSQL_TEST_DSN="sqlserver://ai_reader:...@host:1433?database=db" \
   go test -run TestMSSQL -v ./internal/mssql                  # MSSQL integration (skipped w/o DSN)
 ~/bin/mcp-pg-readonly --selftest --database wb_data_test       # end-to-end RO + anon check
 ~/bin/mcp-mssql-readonly --selftest --database DWH_MART        # same for MSSQL
+cd mcp-websearch && go vet ./... && go test ./...              # websearch gate (own module, no DB)
+go build -o "C:/Users/Public/bin/mcp-websearch.exe" .          # websearch install (Windows VPS)
+C:/Users/Public/bin/mcp-websearch.exe --selftest               # websearch live check (search + read)
 ```
 
 - `--database` is **required** in both binaries (no silent prod default).
@@ -83,7 +86,7 @@ MSSQL_TEST_DSN="sqlserver://ai_reader:...@host:1433?database=db" \
 | `.gitattributes` | CRLF hygiene: `*.cmd`/`*.bat` forced to CRLF (cmd breaks on LF), everything else LF, `*.exe` binary. |
 | `*_test.go` | Unit (`ro_test.go`, `tools_test.go`, `guards_test.go`, `guards_pg_test.go`, mssql `precheck_test.go`/`encode_test.go`) + integration (`ro_integration_test.go` ← `PG_TEST_DSN`; mssql `ro_integration_test.go` ← `MSSQL_TEST_DSN`). |
 | `DEPLOY-WINDOWS.md` | Full from-scratch Windows VPS deploy guide (Russian): prerequisites, network to the PG host, secrets/ACL, role bootstrap, ZCode registration, git/secrets rules, troubleshooting, checklist. Keep in sync with the README "Windows (VPS)" quick section when behavior changes. |
-| `mcp-websearch/` | Second module (`github.com/ilkoid/mcp-websearch`, own go.mod): quota-free local web search / page reader. Tools `web_search` (plain-HTTP DDG/Bing scrape, auto-fallback) + `read_url` (readable-text extraction, 48KB cap, charset-aware). Registered in BOTH ZCode (`~/.zcode/cli/config.json`) and AutoClaw (`~/.openclaw-autoclaw/openclaw.json`) so neither agent burns the hosted web-search/web-reader quota; steering rules live in `~/.zcode/AGENTS.md` and the auto-coder workspace AGENTS.md. `--selftest` probes the live engines; if DDG/Bing ever bot-wall this IP, the documented escalation is the interactive browser, not scraping tricks. |
+| `mcp-websearch/` | Second module (`github.com/ilkoid/mcp-websearch`, own go.mod): quota-free local web search / page reader. Tools `web_search` (plain-HTTP DDG/Bing scrape, auto-fallback) + `read_url` (readable-text extraction, 48KB cap, charset-aware). Platform-neutral Go (net/http + goquery) — no CDP/browser engine anywhere; the "Mac" trace is only the spoofed desktop UA. Registered as entry `websearch` in ZCode on BOTH machines: Mac (`~/bin/mcp-websearch`, `~/.zcode/cli/config.json`) and Windows VPS (exe `C:\Users\Public\bin\mcp-websearch.exe`, `C:\Users\wsl\.zcode\cli\config.json`, `timeoutMs: 60000` — worst case auto mode is ddg-timeout 20s + bing 20s ≈ 40s, client default 30s would cut the fallback; live-verified 2026-11-12: DDG answers from this IP, selftest PASS). No wrapper needed (no secrets, reads no env). AutoClaw registration (`~/.openclaw-autoclaw/openclaw.json`) is Mac-side only. Steering rules: `~/.zcode/AGENTS.md` on both machines (quota rule + 4-level escalation ladder web_search → read_url → built-in browser IAB → Browser MCP); full methodology lives OUTSIDE the repo at `E:\ARM_AI\docs\WEB-PARSING-GUIDE.md` (Mac-side original, 2026-10-18). If DDG/Bing ever bot-wall this IP, the documented escalation is the interactive browser, not scraping tricks. |
 
 ## Architecture rules that matter for edits
 
